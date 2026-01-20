@@ -7,41 +7,51 @@ import time
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Dieta Pro", page_icon="🥗", layout="wide")
 
-# --- FUNÇÃO DE CONEXÃO DIRETA (SEM BIBLIOTECA) ---
+# --- FUNÇÃO DE CONEXÃO UNIVERSAL (TENTA VÁRIOS MODELOS) ---
 def chamar_gemini_direto(prompt, api_key):
-    # Endpoint oficial da API REST do Google
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # Lista de modelos para tentar (do mais novo para o mais antigo)
+    modelos_para_tentar = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-1.0-pro",
+        "gemini-pro"
+    ]
     
     headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        
-        # Se der erro de permissão ou chave
-        if response.status_code != 200:
-            return {"erro": f"Erro {response.status_code}: {response.text}"}
+    erros_log = []
+
+    for modelo in modelos_para_tentar:
+        # Tenta conectar neste modelo específico
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
             
-        dados = response.json()
-        
-        # Extrai o texto da resposta complexa do Google
-        texto_resposta = dados["candidates"][0]["content"]["parts"][0]["text"]
-        
-        # Limpa o JSON
-        limpo = texto_resposta.replace("```json", "").replace("```", "").strip()
-        if "[" in limpo and "]" in limpo:
-            inicio = limpo.find("[")
-            fim = limpo.rfind("]") + 1
-            limpo = limpo[inicio:fim]
-            
-        return json.loads(limpo)
-        
-    except Exception as e:
-        return {"erro": str(e)}
+            # Se funcionou (Código 200), para de tentar e retorna o resultado
+            if response.status_code == 200:
+                dados = response.json()
+                texto_resposta = dados["candidates"][0]["content"]["parts"][0]["text"]
+                
+                # Limpa o JSON
+                limpo = texto_resposta.replace("```json", "").replace("```", "").strip()
+                if "[" in limpo and "]" in limpo:
+                    inicio = limpo.find("[")
+                    fim = limpo.rfind("]") + 1
+                    limpo = limpo[inicio:fim]
+                
+                return {"sucesso": True, "dados": json.loads(limpo), "modelo_usado": modelo}
+            else:
+                # Se deu erro, guarda o motivo e tenta o próximo
+                erros_log.append(f"{modelo}: {response.status_code}")
+                continue
+                
+        except Exception as e:
+            erros_log.append(f"{modelo}: Erro de conexão")
+            continue
+
+    # Se chegou aqui, todos falharam
+    return {"sucesso": False, "erro": " | ".join(erros_log)}
 
 # --- INICIALIZAÇÃO ---
 refeicoes_padrao = ["07:00 - Café da Manhã", "10:00 - Lanche da Manhã", "13:00 - Almoço", "16:00 - Lanche da Tarde", "20:00 - Jantar"]
@@ -59,10 +69,9 @@ if 'refeicoes' not in st.session_state:
 with st.sidebar:
     st.header("👤 Seus Dados")
     
-    # Verifica se a chave existe
     tem_chave = "GOOGLE_API_KEY" in st.secrets
     if not tem_chave:
-        st.error("⚠️ Faltou configurar a API Key nos Secrets!")
+        st.error("⚠️ Configure a API Key!")
 
     sexo = st.radio("Sexo:", ["Masculino", "Feminino"], horizontal=True)
     col_p, col_a, col_i = st.columns(3)
@@ -96,32 +105,30 @@ with st.sidebar:
     
     st.divider()
     
-    # --- BOTÃO DE CÁLCULO (NOVA LÓGICA) ---
+    # --- BOTÃO DE CÁLCULO ---
     if st.button("🤖 Calcular Macros (IA)", type="primary"):
         if not tem_chave:
             st.error("Sem chave configurada.")
         else:
             api_key = st.secrets["GOOGLE_API_KEY"]
-            status = st.status("Conectando ao cérebro da IA...", expanded=True)
+            status = st.status("Conectando ao Nutricionista IA...", expanded=True)
             try:
                 total_novos = 0
                 for ref_nome, df in st.session_state.refeicoes.items():
                     itens_calc = []
                     indices = []
                     
-                    # Prepara lista de itens
                     for i, row in df.iterrows():
                         tem_nome = row["Alimento"] and str(row["Alimento"]).strip() != ""
-                        try: val_k = float(row["Kcal"])
-                        except: val_k = 0
-                        
-                        if tem_nome and val_k == 0:
+                        try: k = float(row["Kcal"])
+                        except: k = 0
+                        if tem_nome and k == 0:
                             q = row["Qtd"] if row["Qtd"] else "1 porção"
                             itens_calc.append(f"{q} de {row['Alimento']}")
                             indices.append(i)
                     
                     if itens_calc:
-                        status.write(f"Calculando {ref_nome}...")
+                        status.write(f"Analisando {ref_nome}...")
                         
                         prompt = f"""
                         Atue como nutricionista. Analise: {itens_calc}.
@@ -129,17 +136,13 @@ with st.sidebar:
                         Exemplo: [{{"kcal": 100, "prot": 10, "carb": 20, "gord": 5}}]
                         """
                         
-                        # CHAMADA DIRETA
-                        res = chamar_gemini_direto(prompt, api_key)
+                        # CHAMA A FUNÇÃO QUE TENTA VÁRIOS MODELOS
+                        resultado = chamar_gemini_direto(prompt, api_key)
                         
-                        # Verifica se voltou erro ou lista
-                        if isinstance(res, dict) and "erro" in res:
-                            status.update(label="Erro na conexão!", state="error")
-                            st.error(res["erro"])
-                            st.stop()
-                        
-                        if isinstance(res, list):
-                            for j, dados in enumerate(res):
+                        if resultado["sucesso"]:
+                            res_lista = resultado["dados"]
+                            status.write(f"✅ Sucesso usando modelo: {resultado['modelo_usado']}")
+                            for j, dados in enumerate(res_lista):
                                 if j < len(indices):
                                     idx = indices[j]
                                     df.at[idx, "Kcal"] = dados.get("kcal", 0)
@@ -147,18 +150,21 @@ with st.sidebar:
                                     df.at[idx, "C(g)"] = dados.get("carb", 0)
                                     df.at[idx, "G(g)"] = dados.get("gord", 0)
                             st.session_state.refeicoes[ref_nome] = df
-                            total_novos += len(res)
+                            total_novos += len(res_lista)
+                        else:
+                            status.error(f"Falha em todos os modelos: {resultado['erro']}")
+                            st.stop()
                 
                 if total_novos > 0:
-                    status.update(label="Sucesso!", state="complete", expanded=False)
+                    status.update(label="Cálculo Concluído!", state="complete", expanded=False)
                     time.sleep(1)
                     st.rerun()
                 else:
                     status.update(label="Nada novo para calcular.", state="complete")
                     
             except Exception as e:
-                status.update(label="Erro interno", state="error")
-                st.error(f"Detalhes: {e}")
+                status.update(label="Erro Crítico", state="error")
+                st.error(f"Erro: {e}")
 
     if st.button("🗑️ Limpar Tudo"):
         for ref in refeicoes_padrao:
@@ -198,7 +204,6 @@ for ref_nome in refeicoes_padrao:
         )
         st.session_state.refeicoes[ref_nome] = df_editado
         
-        # Totais
         s_k = df_editado["Kcal"].sum(); s_p = df_editado["P(g)"].sum(); s_c = df_editado["C(g)"].sum(); s_g = df_editado["G(g)"].sum()
         total_dia_kcal += s_k; total_dia_prot += s_p; total_dia_carb += s_c; total_dia_gord += s_g
         
