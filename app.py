@@ -3,7 +3,7 @@ import google.generativeai as genai
 import json
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Calculadora de Cardápio", page_icon="🍽", layout="wide")
+st.set_page_config(page_title="NutriCalc Pro", page_icon="💪", layout="wide")
 
 # --- CONFIGURAÇÃO DA IA ---
 try:
@@ -15,16 +15,14 @@ except:
 # --- FUNÇÃO QUE ANALISA O CARDÁPIO COMPLETO ---
 def analisar_cardapio(texto_cardapio):
     prompt = f"""
-    Atue como nutricionista. Analise o seguinte cardápio completo:
+    Atue como nutricionista esportivo. Analise o cardápio:
     '''
     {texto_cardapio}
     '''
-    Identifique cada alimento mencionado. Para cada um, estime: calorias (kcal), proteínas (g), carboidratos (g) e gorduras (g).
-    Retorne a resposta APENAS em formato JSON, seguindo estritamente este padrão de lista:
+    Retorne APENAS um JSON (sem markdown) com a lista:
     [
-        {{"alimento": "Nome do Alimento", "qtd": "quantidade", "kcal": 100, "prot": 10, "carb": 20, "gord": 5}}
+        {{"alimento": "Nome", "qtd": "estimada", "kcal": 0, "prot": 0, "carb": 0, "gord": 0}}
     ]
-    Não use Markdown. Retorne apenas o texto puro do JSON.
     """
     try:
         response = model.generate_content(prompt)
@@ -36,14 +34,12 @@ def analisar_cardapio(texto_cardapio):
 # --- BARRA LATERAL (DADOS DO USUÁRIO) ---
 with st.sidebar:
     st.header("👤 Seus Dados")
-    st.info("Preencha os campos abaixo para começar.")
     
-    sexo = st.radio("Sexo:", ["Masculino", "Feminino"], index=None)
-    
-    # value=None deixa o campo em branco inicialmente
-    peso = st.number_input("Peso (Kg):", value=None, placeholder="Ex: 70.5")
-    altura = st.number_input("Altura (cm):", value=None, placeholder="Ex: 175", step=1)
-    idade = st.number_input("Idade:", value=None, placeholder="Ex: 25", step=1)
+    sexo = st.radio("Sexo:", ["Masculino", "Feminino"], horizontal=True)
+    col_p, col_a, col_i = st.columns(3)
+    peso = col_p.number_input("Peso (Kg):", value=None, placeholder="00.0")
+    altura = col_a.number_input("Altura (cm):", value=None, placeholder="000", step=1)
+    idade = col_i.number_input("Idade:", value=None, placeholder="00", step=1)
     
     atividade_opcoes = {
         "Sedentário (1.2)": 1.2,
@@ -52,76 +48,132 @@ with st.sidebar:
         "Muito ativo (1.725)": 1.725,
         "Extremamente ativo (1.9)": 1.9
     }
-    # index=None deixa a caixa de seleção vazia
     atividade_selecionada = st.selectbox("Nível de Atividade:", list(atividade_opcoes.keys()), index=None, placeholder="Selecione...")
     
-    objetivo = st.selectbox("Objetivo:", ["Definição (-500kcal)", "Manutenção", "Hipertrofia (+500kcal)"], index=None, placeholder="Selecione...")
+    st.divider()
+    
+    # --- 1. CONFIGURAÇÃO DE OBJETIVO MANUAL ---
+    st.header("🎯 Objetivo & Calorias")
+    objetivo = st.selectbox("Fase Atual:", ["Manutenção", "Definição (Perder)", "Hipertrofia (Ganhar)"], index=None, placeholder="Selecione...")
 
-# --- VERIFICAÇÃO SE DADOS FORAM PREENCHIDOS ---
-# O app só mostra a calculadora se todas as variáveis tiverem valor
-if peso and altura and idade and atividade_selecionada and objetivo and sexo:
+    ajuste_calorico = 0
+    if objetivo == "Definição (Perder)":
+        ajuste_calorico = st.number_input("Déficit Calórico (Kcal):", value=500, step=50, help="Quanto você quer comer A MENOS que seu gasto?")
+        ajuste_calorico = -ajuste_calorico # Torna negativo
+    elif objetivo == "Hipertrofia (Ganhar)":
+        ajuste_calorico = st.number_input("Superávit Calórico (Kcal):", value=300, step=50, help="Quanto você quer comer A MAIS que seu gasto?")
+
+    st.divider()
+
+    # --- 2. CONFIGURAÇÃO DE MACROS MANUAL ---
+    st.header("⚙️ Configurar Macros")
+    st.info("Defina seus macros em g/kg (gramas por quilo corporal).")
     
-    # Cálculos Basais
+    # Valores padrão comuns na nutrição
+    def_prot = 2.0
+    def_gord = 0.8
+    def_carb = 4.0
+    
+    # Se o objetivo for definição, sugere carbos mais baixos
+    if objetivo == "Definição (Perder)":
+        def_carb = 2.5
+        def_prot = 2.2 # Proteína mais alta no cutting
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    prot_g_kg = col_m1.number_input("Prot (g/kg)", value=def_prot, step=0.1, format="%.1f")
+    carb_g_kg = col_m2.number_input("Carb (g/kg)", value=def_carb, step=0.1, format="%.1f")
+    gord_g_kg = col_m3.number_input("Gord (g/kg)", value=def_gord, step=0.1, format="%.1f")
+
+
+# --- LÓGICA PRINCIPAL ---
+if peso and altura and idade and atividade_selecionada and objetivo:
+    
+    # 1. Cálculos Basais
     fator = atividade_opcoes[atividade_selecionada]
-    
     if sexo == "Masculino":
         tmb = 66.5 + (13.75 * peso) + (5.003 * altura) - (6.75 * idade)
     else:
         tmb = 655.1 + (9.563 * peso) + (1.850 * altura) - (4.676 * idade)
     
     gasto_total = tmb * fator
+    meta_calorias_calculada = int(gasto_total + ajuste_calorico)
     
-    ajuste = -500 if "Definição" in objetivo else (500 if "Hipertrofia" in objetivo else 0)
-    meta_calorias = int(gasto_total + ajuste)
+    # 2. Cálculo dos Macros Manuais (O que o usuário configurou)
+    meta_prot = int(peso * prot_g_kg)
+    meta_carb = int(peso * carb_g_kg)
+    meta_gord = int(peso * gord_g_kg)
     
-    # Exibe a meta na barra lateral
+    # Calorias geradas pelos macros configurados
+    calorias_dos_macros = (meta_prot * 4) + (meta_carb * 4) + (meta_gord * 9)
+
+    # --- Exibição na Barra Lateral (Resumo) ---
     st.sidebar.divider()
-    st.sidebar.metric("🎯 Meta Diária", f"{meta_calorias} kcal")
+    st.sidebar.write(f"**TMB:** {int(tmb)} kcal")
+    st.sidebar.write(f"**Gasto Total:** {int(gasto_total)} kcal")
     
-    meta_prot = int((meta_calorias * 0.40) / 4)
-    meta_carb = int((meta_calorias * 0.40) / 4)
-    meta_gord = int((meta_calorias * 0.20) / 9)
-    st.sidebar.caption(f"Metas: P: {meta_prot}g | C: {meta_carb}g | G: {meta_gord}g")
+    # Aviso se houver discrepância grande entre a Meta de Calorias e os Macros
+    diff = calorias_dos_macros - meta_calorias_calculada
+    
+    st.sidebar.metric("🔥 Meta pelos Macros", f"{calorias_dos_macros} kcal", delta=f"{diff} vs Estimativa")
+    st.sidebar.caption(f"P: {meta_prot}g | C: {meta_carb}g | G: {meta_gord}g")
 
-    # --- TELA PRINCIPAL (SÓ APARECE COM DADOS PREENCHIDOS) ---
-    st.title("🍽 Calculadora de Cardápio")
-    st.write("Cole seu planejamento alimentar completo abaixo.")
 
-    cardapio_input = st.text_area("Digite o cardápio aqui:", height=150, placeholder="Exemplo:\nCafé: 2 ovos\nAlmoço: Arroz e feijão")
+    # --- TELA PRINCIPAL ---
+    st.title("💪 Calculadora Pro")
+    
+    # Input do Cardápio
+    st.write("Cole seu planejamento alimentar completo abaixo:")
+    cardapio_input = st.text_area("", height=150, placeholder="Ex: Café: 3 ovos e 1 banana...")
 
-    if st.button("Calcular Cardápio Completo"):
+    if st.button("Calcular Cardápio"):
         if not cardapio_input:
-            st.warning("Por favor, digite algum alimento.")
+            st.warning("Digite seu cardápio primeiro.")
         else:
-            with st.spinner("Analisando..."):
-                dados_cardapio = analisar_cardapio(cardapio_input)
+            with st.spinner("Analisando macros..."):
+                dados = analisar_cardapio(cardapio_input)
                 
-                if dados_cardapio:
-                    total_kcal = sum(item['kcal'] for item in dados_cardapio)
-                    total_prot = sum(item['prot'] for item in dados_cardapio)
-                    total_carb = sum(item['carb'] for item in dados_cardapio)
-                    total_gord = sum(item['gord'] for item in dados_cardapio)
+                if dados:
+                    total_kcal = sum(i['kcal'] for i in dados)
+                    total_prot = sum(i['prot'] for i in dados)
+                    total_carb = sum(i['carb'] for i in dados)
+                    total_gord = sum(i['gord'] for i in dados)
 
                     st.divider()
-                    st.subheader("📊 Resultado do Planejamento")
+                    
+                    # --- DASHBOARD COMPARATIVO ---
+                    # Vamos comparar o Cardápio (Real) vs A Configuração Manual (Meta)
                     
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Calorias", f"{total_kcal}", f"{total_kcal - meta_calorias} da meta")
-                    c2.metric("Proteínas", f"{total_prot}g", f"{total_prot - meta_prot}g")
-                    c3.metric("Carboidratos", f"{total_carb}g", f"{total_carb - meta_carb}g")
-                    c4.metric("Gorduras", f"{total_gord}g", f"{total_gord - meta_gord}g")
-
-                    st.write("### Progresso da Meta")
-                    st.progress(min(total_kcal / meta_calorias, 1.0) if meta_calorias > 0 else 0)
                     
+                    def delta_metric(real, meta, suffix=""):
+                        diff = real - meta
+                        return f"{diff}{suffix}"
+
+                    c1.metric("Calorias", f"{total_kcal}", delta_metric(total_kcal, calorias_dos_macros))
+                    c2.metric("Proteínas", f"{total_prot}g", delta_metric(total_prot, meta_prot, "g"))
+                    c3.metric("Carboidratos", f"{total_carb}g", delta_metric(total_carb, meta_carb, "g"))
+                    c4.metric("Gorduras", f"{total_gord}g", delta_metric(total_gord, meta_gord, "g"))
+
+                    st.write("### 📊 Aderência à Dieta")
+                    
+                    # Barras de Progresso
+                    st.caption(f"Proteína ({total_prot}/{meta_prot}g)")
+                    st.progress(min(total_prot / meta_prot if meta_prot > 0 else 0, 1.0))
+                    
+                    st.caption(f"Carboidrato ({total_carb}/{meta_carb}g)")
+                    st.progress(min(total_carb / meta_carb if meta_carb > 0 else 0, 1.0))
+                    
+                    st.caption(f"Gordura ({total_gord}/{meta_gord}g)")
+                    st.progress(min(total_gord / meta_gord if meta_gord > 0 else 0, 1.0))
+                    
+                    st.caption(f"Calorias Totais ({total_kcal}/{calorias_dos_macros} kcal)")
+                    if total_kcal > calorias_dos_macros:
+                        st.warning("⚠️ Você ultrapassou as calorias planejadas!")
+                    else:
+                        st.success("✅ Dentro do planejado.")
+
                     st.divider()
-                    st.subheader("📝 Detalhamento")
-                    st.table(dados_cardapio)
-                else:
-                    st.error("Erro ao ler o cardápio. Tente simplificar.")
+                    st.table(dados)
 
 else:
-    # TELA DE BOAS-VINDAS (QUANDO TUDO ESTÁ EM BRANCO)
-    st.title("👋 Bem-vindo ao NutriCalc")
-    st.info("👈 Por favor, preencha seus dados na barra lateral (ao lado esquerdo) para gerarmos sua meta calórica personalizada.")
-    st.write("Assim que preencher, a calculadora aparecerá aqui automaticamente.")
+    st.info("👈 Preencha seus dados e configure seus macros na barra lateral para começar.")
