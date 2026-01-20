@@ -3,7 +3,7 @@ import streamlit as st
 # Configuração da página
 st.set_page_config(page_title="NutriCalc Pro", page_icon="🍎")
 
-st.title("🍎 Calculadora Nutricional")
+st.title("🍎 TMB - Taxa Metabolica Basal")
 st.write("Baseado no seu painel de referência.")
 
 # --- BARRA LATERAL (ENTRADA DE DADOS) ---
