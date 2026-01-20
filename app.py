@@ -16,20 +16,18 @@ try:
     if "GOOGLE_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
         
-        # --- A MÁGICA: AUTO-DETECÇÃO DE MODELO ---
-        # Em vez de forçar um nome, pedimos a lista disponível para sua chave
+        # AUTO-DETECÇÃO DE MODELO
         modelos_disponiveis = []
         try:
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
                     modelos_disponiveis.append(m.name)
         except Exception as e:
-            api_key_status = f"Erro ao listar modelos: {e}"
+            api_key_status = f"Erro listar: {e}"
 
         if modelos_disponiveis:
-            # Tenta pegar o Flash ou Pro, senão pega o primeiro da lista
             preferidos = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-1.0-pro"]
-            escolhido = modelos_disponiveis[0] # Padrão: o primeiro que achar
+            escolhido = modelos_disponiveis[0]
             
             for pref in preferidos:
                 if pref in modelos_disponiveis:
@@ -39,35 +37,33 @@ try:
             model = genai.GenerativeModel(escolhido)
             nome_modelo_usado = escolhido
         else:
-            api_key_status = "Nenhum modelo encontrado para esta Chave."
+            api_key_status = "Sem modelos disponíveis."
             
     else:
         api_key_status = "FALTA_KEY"
 except Exception as e:
-    api_key_status = f"ERRO GERAL: {e}"
+    api_key_status = f"ERRO: {e}"
 
 # --- FUNÇÃO DA IA ---
 def calcular_alimentos_ia(lista_alimentos):
     if not lista_alimentos or not model: return []
     
     prompt = f"""
-    Atue como nutricionista. Analise: {lista_alimentos}.
+    Nutricionista: analise {lista_alimentos}.
     Responda APENAS um JSON (lista de objetos). 
     Exemplo: [{{"kcal": 100, "prot": 10, "carb": 20, "gord": 5}}]
     """
     try:
         response = model.generate_content(prompt)
         texto = response.text
-        
         limpo = texto.replace("```json", "").replace("```", "").strip()
         if "[" in limpo and "]" in limpo:
             inicio = limpo.find("[")
             fim = limpo.rfind("]") + 1
             limpo = limpo[inicio:fim]
-            
         return json.loads(limpo)
     except Exception as e:
-        st.error(f"Erro ao gerar: {e}")
+        st.error(f"Erro IA: {e}")
         return []
 
 # --- INICIALIZAÇÃO ---
@@ -86,7 +82,6 @@ if 'refeicoes' not in st.session_state:
 with st.sidebar:
     st.header("👤 Seus Dados")
     
-    # Debug para sabermos o que está acontecendo
     if api_key_status == "OK":
         st.success(f"Conectado: {nome_modelo_usado.replace('models/', '')}")
     else:
@@ -124,12 +119,15 @@ with st.sidebar:
     
     st.divider()
     
-    # --- BOTÃO DE CÁLCULO ---
+    # --- NOVIDADE AQUI: CHECKBOX PARA FORÇAR ---
+    st.write("### Ações")
+    forcar = st.checkbox("🔄 Recalcular tudo (Mesmo os prontos)", help="Marque isso se mudou a quantidade de um item já calculado.")
+    
     if st.button("🤖 Calcular Macros (IA)", type="primary"):
         if api_key_status != "OK" or not model:
-            st.error("A IA não está pronta. Verifique a chave.")
+            st.error("IA indisponível.")
         else:
-            status = st.status(f"Usando {nome_modelo_usado}...", expanded=True)
+            status = st.status("Processando...", expanded=True)
             try:
                 total_novos = 0
                 for ref_nome, df in st.session_state.refeicoes.items():
@@ -138,9 +136,14 @@ with st.sidebar:
                     
                     for i, row in df.iterrows():
                         tem_nome = row["Alimento"] and str(row["Alimento"]).strip() != ""
+                        
                         try: k = float(row["Kcal"])
                         except: k = 0
-                        if tem_nome and k == 0:
+                        
+                        # LOGICA NOVA: Se 'forcar' estiver marcado, ignora se k é zero
+                        precisa_calcular = (k == 0) or forcar
+                        
+                        if tem_nome and precisa_calcular:
                             q = row["Qtd"] if row["Qtd"] else "1 porção"
                             itens_calc.append(f"{q} de {row['Alimento']}")
                             indices.append(i)
@@ -160,15 +163,15 @@ with st.sidebar:
                             total_novos += len(res)
                 
                 if total_novos > 0:
-                    status.update(label="Concluído!", state="complete", expanded=False)
+                    status.update(label="Atualizado!", state="complete", expanded=False)
                     time.sleep(1)
                     st.rerun()
                 else:
-                    status.update(label="Nada novo para calcular.", state="complete")
+                    status.update(label="Tudo atualizado.", state="complete")
                     
             except Exception as e:
                 status.update(label="Erro!", state="error")
-                st.error(f"Detalhe: {e}")
+                st.error(f"Erro: {e}")
 
     if st.button("🗑️ Limpar Tudo"):
         for ref in refeicoes_padrao:
@@ -208,7 +211,6 @@ for ref_nome in refeicoes_padrao:
         )
         st.session_state.refeicoes[ref_nome] = df_editado
         
-        # Totais
         s_k = df_editado["Kcal"].sum(); s_p = df_editado["P(g)"].sum(); s_c = df_editado["C(g)"].sum(); s_g = df_editado["G(g)"].sum()
         total_dia_kcal += s_k; total_dia_prot += s_p; total_dia_carb += s_c; total_dia_gord += s_g
         
