@@ -98,19 +98,19 @@ with st.sidebar:
     else:
         st.error(f"⚠️ {api_key_status}")
 
-    # --- CONFIGURADOR DE HORÁRIOS (NOVO) ---
+    # --- CONFIGURADOR DE HORÁRIOS (CORRIGIDO) ---
     with st.expander("⚙️ Configurar Horários", expanded=False):
         st.caption("Adicione ou remova linhas abaixo:")
         df_schedule = pd.DataFrame(st.session_state.meus_horarios)
         
-        # Editor que permite adicionar/remover linhas
+        # REMOVIDO O 'PLACEHOLDER' QUE DAVA ERRO
         df_schedule_editado = st.data_editor(
             df_schedule, 
             num_rows="dynamic", 
             use_container_width=True,
             column_config={
-                "Horário": st.column_config.TextColumn("Horário", width="small", placeholder="00:00"),
-                "Nome": st.column_config.TextColumn("Nome", width="medium", placeholder="Ex: Ceia")
+                "Horário": st.column_config.TextColumn("Horário", width="small"),
+                "Nome": st.column_config.TextColumn("Nome", width="medium")
             },
             hide_index=True
         )
@@ -162,12 +162,9 @@ with st.sidebar:
             status = st.status("Processando...", expanded=True)
             try:
                 total_novos = 0
-                # Itera sobre os horários CONFIGURADOS pelo usuário
                 for item in st.session_state.meus_horarios:
-                    # Monta a chave única (Ex: "07:00 - Café")
                     ref_nome = f"{item['Horário']} - {item['Nome']}"
                     
-                    # Garante que existe tabela para essa refeição nova
                     if ref_nome not in st.session_state.refeicoes:
                         st.session_state.refeicoes[ref_nome] = pd.DataFrame([{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}])
                     
@@ -180,7 +177,6 @@ with st.sidebar:
                         try: k = float(row["Kcal"])
                         except: k = 0
                         
-                        # Se Kcal é zero OU se o usuário mandou forçar
                         precisa_calcular = (k == 0) or forcar
                         
                         if tem_nome and precisa_calcular:
@@ -214,7 +210,7 @@ with st.sidebar:
                 st.error(f"Erro: {e}")
 
     if st.button("🗑️ Limpar Tudo"):
-        st.session_state.refeicoes = {} # Limpa dados
+        st.session_state.refeicoes = {}
         st.rerun()
 
 # ==========================================
@@ -227,11 +223,9 @@ total_dia_prot = 0
 total_dia_carb = 0
 total_dia_gord = 0
 
-# Loop dinâmico baseado no que você configurou
 for item in st.session_state.meus_horarios:
     ref_nome = f"{item['Horário']} - {item['Nome']}"
     
-    # Se criou a refeição agora e não tem tabela, cria uma vazia
     if ref_nome not in st.session_state.refeicoes:
          st.session_state.refeicoes[ref_nome] = pd.DataFrame(
             [{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}]
@@ -248,7 +242,7 @@ for item in st.session_state.meus_horarios:
             st.session_state.refeicoes[ref_nome],
             num_rows="dynamic",
             use_container_width=True,
-            key=f"editor_{ref_nome}", # Chave única
+            key=f"editor_{ref_nome}",
             column_config={
                 "Alimento": st.column_config.TextColumn("Alimento", width="large"),
                 "Qtd": st.column_config.TextColumn("Qtd", width="small"),
@@ -261,7 +255,6 @@ for item in st.session_state.meus_horarios:
         )
         st.session_state.refeicoes[ref_nome] = df_editado
         
-        # Totais
         s_k = df_editado["Kcal"].sum(); s_p = df_editado["P(g)"].sum(); s_c = df_editado["C(g)"].sum(); s_g = df_editado["G(g)"].sum()
         total_dia_kcal += s_k; total_dia_prot += s_p; total_dia_carb += s_c; total_dia_gord += s_g
         
