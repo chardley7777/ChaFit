@@ -5,7 +5,7 @@ import json
 import time
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Dieta Pro", page_icon="🥗", layout="wide")
+st.set_page_config(page_title="Dieta Pro Flex", page_icon="🥗", layout="wide")
 
 # --- CONFIGURAÇÃO DA IA ---
 api_key_status = "OK"
@@ -28,17 +28,14 @@ try:
         if modelos_disponiveis:
             preferidos = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-1.0-pro"]
             escolhido = modelos_disponiveis[0]
-            
             for pref in preferidos:
                 if pref in modelos_disponiveis:
                     escolhido = pref
                     break
-            
             model = genai.GenerativeModel(escolhido)
             nome_modelo_usado = escolhido
         else:
-            api_key_status = "Sem modelos disponíveis."
-            
+            api_key_status = "Sem modelos disponíveis." 
     else:
         api_key_status = "FALTA_KEY"
 except Exception as e:
@@ -66,13 +63,27 @@ def calcular_alimentos_ia(lista_alimentos):
         st.error(f"Erro IA: {e}")
         return []
 
-# --- INICIALIZAÇÃO ---
-refeicoes_padrao = ["07:00 - Café da Manhã", "10:00 - Lanche da Manhã", "13:00 - Almoço", "16:00 - Lanche da Tarde", "20:00 - Jantar"]
+# --- INICIALIZAÇÃO DE DADOS ---
+# Lista padrão inicial (caso o usuário nunca tenha mexido)
+schedule_padrao = [
+    {"Horário": "07:00", "Nome": "Café da Manhã"},
+    {"Horário": "10:00", "Nome": "Lanche da Manhã"},
+    {"Horário": "13:00", "Nome": "Almoço"},
+    {"Horário": "16:00", "Nome": "Lanche da Tarde"},
+    {"Horário": "20:00", "Nome": "Jantar"},
+]
+
+if 'meus_horarios' not in st.session_state:
+    st.session_state.meus_horarios = schedule_padrao
 
 if 'refeicoes' not in st.session_state:
     st.session_state.refeicoes = {}
-    for ref in refeicoes_padrao:
-        st.session_state.refeicoes[ref] = pd.DataFrame(
+
+# Garante que cada horário configurado tenha sua tabela criada
+for item in st.session_state.meus_horarios:
+    chave = f"{item['Horário']} - {item['Nome']}"
+    if chave not in st.session_state.refeicoes:
+        st.session_state.refeicoes[chave] = pd.DataFrame(
             [{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}]
         )
 
@@ -87,6 +98,28 @@ with st.sidebar:
     else:
         st.error(f"⚠️ {api_key_status}")
 
+    # --- CONFIGURADOR DE HORÁRIOS (NOVO) ---
+    with st.expander("⚙️ Configurar Horários", expanded=False):
+        st.caption("Adicione ou remova linhas abaixo:")
+        df_schedule = pd.DataFrame(st.session_state.meus_horarios)
+        
+        # Editor que permite adicionar/remover linhas
+        df_schedule_editado = st.data_editor(
+            df_schedule, 
+            num_rows="dynamic", 
+            use_container_width=True,
+            column_config={
+                "Horário": st.column_config.TextColumn("Horário", width="small", placeholder="00:00"),
+                "Nome": st.column_config.TextColumn("Nome", width="medium", placeholder="Ex: Ceia")
+            },
+            hide_index=True
+        )
+        # Atualiza a lista oficial
+        st.session_state.meus_horarios = df_schedule_editado.to_dict('records')
+
+    st.divider()
+
+    # Inputs Pessoais
     sexo = st.radio("Sexo:", ["Masculino", "Feminino"], horizontal=True)
     col_p, col_a, col_i = st.columns(3)
     peso = col_p.number_input("Peso (Kg):", value=70.0, format="%.1f")
@@ -119,9 +152,8 @@ with st.sidebar:
     
     st.divider()
     
-    # --- NOVIDADE AQUI: CHECKBOX PARA FORÇAR ---
     st.write("### Ações")
-    forcar = st.checkbox("🔄 Recalcular tudo (Mesmo os prontos)", help="Marque isso se mudou a quantidade de um item já calculado.")
+    forcar = st.checkbox("🔄 Recalcular tudo (Mesmo os prontos)", help="Marque para atualizar itens que você mudou a quantidade.")
     
     if st.button("🤖 Calcular Macros (IA)", type="primary"):
         if api_key_status != "OK" or not model:
@@ -130,17 +162,25 @@ with st.sidebar:
             status = st.status("Processando...", expanded=True)
             try:
                 total_novos = 0
-                for ref_nome, df in st.session_state.refeicoes.items():
+                # Itera sobre os horários CONFIGURADOS pelo usuário
+                for item in st.session_state.meus_horarios:
+                    # Monta a chave única (Ex: "07:00 - Café")
+                    ref_nome = f"{item['Horário']} - {item['Nome']}"
+                    
+                    # Garante que existe tabela para essa refeição nova
+                    if ref_nome not in st.session_state.refeicoes:
+                        st.session_state.refeicoes[ref_nome] = pd.DataFrame([{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}])
+                    
+                    df = st.session_state.refeicoes[ref_nome]
                     itens_calc = []
                     indices = []
                     
                     for i, row in df.iterrows():
                         tem_nome = row["Alimento"] and str(row["Alimento"]).strip() != ""
-                        
                         try: k = float(row["Kcal"])
                         except: k = 0
                         
-                        # LOGICA NOVA: Se 'forcar' estiver marcado, ignora se k é zero
+                        # Se Kcal é zero OU se o usuário mandou forçar
                         precisa_calcular = (k == 0) or forcar
                         
                         if tem_nome and precisa_calcular:
@@ -174,31 +214,41 @@ with st.sidebar:
                 st.error(f"Erro: {e}")
 
     if st.button("🗑️ Limpar Tudo"):
-        for ref in refeicoes_padrao:
-             st.session_state.refeicoes[ref] = pd.DataFrame([{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}])
+        st.session_state.refeicoes = {} # Limpa dados
         st.rerun()
 
 # ==========================================
 # ÁREA PRINCIPAL
 # ==========================================
-st.title("📋 Planejador de Dieta")
+st.title("📋 Planejador de Dieta Flexível")
 
 total_dia_kcal = 0
 total_dia_prot = 0
 total_dia_carb = 0
 total_dia_gord = 0
 
-for ref_nome in refeicoes_padrao:
+# Loop dinâmico baseado no que você configurou
+for item in st.session_state.meus_horarios:
+    ref_nome = f"{item['Horário']} - {item['Nome']}"
+    
+    # Se criou a refeição agora e não tem tabela, cria uma vazia
+    if ref_nome not in st.session_state.refeicoes:
+         st.session_state.refeicoes[ref_nome] = pd.DataFrame(
+            [{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}]
+        )
+
     col_tempo, col_tabela = st.columns([1, 6])
+    
     with col_tempo:
-        st.markdown(f"### {ref_nome.split('-')[0]}")
+        st.markdown(f"### {item['Horário']}")
+    
     with col_tabela:
-        st.markdown(f"**{ref_nome.split('-')[1]}**")
+        st.markdown(f"**{item['Nome']}**")
         df_editado = st.data_editor(
             st.session_state.refeicoes[ref_nome],
             num_rows="dynamic",
             use_container_width=True,
-            key=f"editor_{ref_nome}",
+            key=f"editor_{ref_nome}", # Chave única
             column_config={
                 "Alimento": st.column_config.TextColumn("Alimento", width="large"),
                 "Qtd": st.column_config.TextColumn("Qtd", width="small"),
@@ -211,6 +261,7 @@ for ref_nome in refeicoes_padrao:
         )
         st.session_state.refeicoes[ref_nome] = df_editado
         
+        # Totais
         s_k = df_editado["Kcal"].sum(); s_p = df_editado["P(g)"].sum(); s_c = df_editado["C(g)"].sum(); s_g = df_editado["G(g)"].sum()
         total_dia_kcal += s_k; total_dia_prot += s_p; total_dia_carb += s_c; total_dia_gord += s_g
         
