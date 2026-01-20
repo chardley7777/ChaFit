@@ -2,29 +2,34 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 import json
-import re
 import time
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Dieta Pro", page_icon="🥗", layout="wide")
+
+# --- DEBUG: MOSTRAR VERSÃO DA BIBLIOTECA ---
+# Isso vai aparecer no topo para confirmarmos se o servidor atualizou
+try:
+    lib_version = genai.__version__
+except:
+    lib_version = "Desconhecida"
 
 # --- CONFIGURAÇÃO DA IA ---
 api_key_status = "OK"
 try:
     if "GOOGLE_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        # VOLTAMOS PARA O PRO (Funciona em todas as versões)
-        model = genai.GenerativeModel('gemini-pro')
+        # USANDO O MODELO FLASH (Requer google-generativeai >= 0.8.0)
+        model = genai.GenerativeModel('gemini-1.5-flash')
     else:
         api_key_status = "FALTA_KEY"
 except Exception as e:
     api_key_status = f"ERRO CONFIG: {e}"
 
-# --- FUNÇÃO DA IA (COM LOG VISUAL) ---
+# --- FUNÇÃO DA IA ---
 def calcular_alimentos_ia(lista_alimentos):
     if not lista_alimentos: return []
     
-    # Prompt simplificado para evitar erros
     prompt = f"""
     Nutricionista: analise {lista_alimentos}.
     Responda APENAS um JSON (lista de objetos). 
@@ -34,9 +39,8 @@ def calcular_alimentos_ia(lista_alimentos):
         response = model.generate_content(prompt)
         texto = response.text
         
-        # Limpeza robusta do texto
+        # Limpeza do texto para extrair JSON
         limpo = texto.replace("```json", "").replace("```", "").strip()
-        # Se tiver texto extra antes ou depois, tenta pegar só o que parece JSON
         if "[" in limpo and "]" in limpo:
             inicio = limpo.find("[")
             fim = limpo.rfind("]") + 1
@@ -44,7 +48,7 @@ def calcular_alimentos_ia(lista_alimentos):
             
         return json.loads(limpo)
     except Exception as e:
-        st.error(f"Erro ao ler resposta da IA: {e}")
+        st.error(f"Erro na leitura da IA: {e}")
         return []
 
 # --- INICIALIZAÇÃO ---
@@ -58,10 +62,12 @@ if 'refeicoes' not in st.session_state:
         )
 
 # ==========================================
-# BARRA LATERAL (DO JEITO QUE VOCÊ GOSTA)
+# BARRA LATERAL
 # ==========================================
 with st.sidebar:
     st.header("👤 Seus Dados")
+    # Mostra a versão para sabermos se o REBOOT funcionou
+    st.caption(f"Versão do Sistema: v{lib_version}")
     
     if api_key_status != "OK":
         st.error(f"⚠️ API Key: {api_key_status}")
@@ -78,14 +84,13 @@ with st.sidebar:
     
     st.divider()
     
-    st.header("🎯 Meta & Calorias")
-    objetivo = st.selectbox("Objetivo:", ["Definição (Perder)", "Manutenção", "Hipertrofia (Ganhar)"])
-
+    st.header("🎯 Metas")
+    objetivo = st.selectbox("Objetivo:", ["Definição (-)", "Manutenção", "Hipertrofia (+)"])
     ajuste = 0
-    if "Perder" in objetivo: ajuste = -st.number_input("Déficit (-):", value=500, step=50)
-    elif "Ganhar" in objetivo: ajuste = st.number_input("Superávit (+):", value=300, step=50)
+    if "Definição" in objetivo: ajuste = -st.number_input("Déficit:", value=500, step=50)
+    elif "Hipertrofia" in objetivo: ajuste = st.number_input("Superávit:", value=300, step=50)
 
-    st.subheader("Configurar Macros (g/kg)")
+    st.subheader("Macros (g/kg)")
     c1, c2, c3 = st.columns(3)
     prot_g_kg = c1.number_input("Prot", value=2.0, step=0.1)
     carb_g_kg = c2.number_input("Carb", value=4.0, step=0.1)
@@ -93,44 +98,40 @@ with st.sidebar:
 
     tmb_val = 66.5 + (13.75 * peso) + (5.003 * altura) - (6.75 * idade) if sexo == "Masculino" else 655.1 + (9.563 * peso) + (1.850 * altura) - (4.676 * idade)
     meta_calorias = int((tmb_val * fator) + ajuste)
-    meta_prot = int(peso * prot_g_kg)
-    meta_carb = int(peso * carb_g_kg)
-    meta_gord = int(peso * gord_g_kg)
     
     st.divider()
     st.metric("🔥 Meta Diária", f"{meta_calorias} kcal")
     
     st.divider()
     
-    # --- BOTÃO DE CÁLCULO (LÓGICA BLINDADA) ---
+    # --- BOTÃO DE CÁLCULO ---
     if st.button("🤖 Calcular Macros (IA)", type="primary"):
         if api_key_status != "OK":
-            st.error("ERRO: Configure a API Key nos Secrets!")
+            st.error("Configure sua API KEY!")
         else:
-            # STATUS AZUL NA TELA PARA VOCÊ VER O QUE ESTÁ ACONTECENDO
-            status = st.status("Iniciando Nutricionista IA...", expanded=True)
+            status = st.status("Processando...", expanded=True)
             try:
-                total_itens = 0
+                total_novos = 0
                 for ref_nome, df in st.session_state.refeicoes.items():
                     itens_calc = []
                     indices = []
                     
-                    # Varre a tabela procurando itens sem Kcal
                     for i, row in df.iterrows():
                         tem_nome = row["Alimento"] and str(row["Alimento"]).strip() != ""
-                        # Verifica se Kcal é zero/vazio de forma segura
-                        kcal = pd.to_numeric(row["Kcal"], errors='coerce')
-                        if pd.isna(kcal): kcal = 0
+                        # Verifica Kcal zero de forma segura
+                        try:
+                            k = float(row["Kcal"])
+                        except:
+                            k = 0
                         
-                        if tem_nome and kcal == 0:
-                            qtd = row["Qtd"] if row["Qtd"] else "1 porção"
-                            itens_calc.append(f"{qtd} de {row['Alimento']}")
+                        if tem_nome and k == 0:
+                            q = row["Qtd"] if row["Qtd"] else "1 porção"
+                            itens_calc.append(f"{q} de {row['Alimento']}")
                             indices.append(i)
                     
                     if itens_calc:
-                        status.write(f"Refeição {ref_nome}: Enviando {len(itens_calc)} itens para IA...")
+                        status.write(f"Calculando {ref_nome}...")
                         res = calcular_alimentos_ia(itens_calc)
-                        
                         if res:
                             for j, dados in enumerate(res):
                                 if j < len(indices):
@@ -140,19 +141,18 @@ with st.sidebar:
                                     df.at[idx, "C(g)"] = dados.get("carb", 0)
                                     df.at[idx, "G(g)"] = dados.get("gord", 0)
                             st.session_state.refeicoes[ref_nome] = df
-                            total_itens += len(res)
-                        else:
-                            status.warning(f"A IA não conseguiu ler os itens de {ref_nome}.")
-                            
-                if total_itens > 0:
-                    status.update(label="✅ Sucesso! Cardápio calculado.", state="complete", expanded=False)
-                    time.sleep(1) # Dá tempo de ver a mensagem antes de atualizar
+                            total_novos += len(res)
+                
+                if total_novos > 0:
+                    status.update(label="Concluído!", state="complete", expanded=False)
+                    time.sleep(1)
                     st.rerun()
                 else:
-                    status.update(label="⚠️ Nenhum item novo encontrado para calcular.", state="error")
+                    status.update(label="Nada novo para calcular.", state="complete")
+                    
             except Exception as e:
-                status.update(label="❌ Erro fatal no cálculo", state="error")
-                st.error(f"Detalhe do erro: {e}")
+                status.update(label="Erro!", state="error")
+                st.error(f"Erro: {e}")
 
     if st.button("🗑️ Limpar Tudo"):
         for ref in refeicoes_padrao:
@@ -192,6 +192,7 @@ for ref_nome in refeicoes_padrao:
         )
         st.session_state.refeicoes[ref_nome] = df_editado
         
+        # Totais
         s_k = df_editado["Kcal"].sum(); s_p = df_editado["P(g)"].sum(); s_c = df_editado["C(g)"].sum(); s_g = df_editado["G(g)"].sum()
         total_dia_kcal += s_k; total_dia_prot += s_p; total_dia_carb += s_c; total_dia_gord += s_g
         
@@ -199,6 +200,10 @@ for ref_nome in refeicoes_padrao:
         st.divider()
 
 # Rodapé
+meta_prot = int(peso * prot_g_kg)
+meta_carb = int(peso * carb_g_kg)
+meta_gord = int(peso * gord_g_kg)
+
 st.subheader("📊 Resumo do Dia")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Kcal", f"{int(total_dia_kcal)}", f"{int(total_dia_kcal - meta_calorias)}")
