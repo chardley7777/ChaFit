@@ -2,7 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 import json
-import re # Biblioteca para encontrar o JSON no texto
+import re
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Dieta Pro com IA", page_icon="💪", layout="wide")
@@ -12,7 +12,8 @@ api_key_status = "OK"
 try:
     if "GOOGLE_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # MUDANÇA AQUI: Trocamos para 'gemini-pro' que é mais compatível
+        model = genai.GenerativeModel('gemini-pro')
     else:
         api_key_status = "FALTA_KEY"
 except Exception as e:
@@ -23,35 +24,36 @@ def calcular_alimentos_ia(lista_alimentos):
     if not lista_alimentos: return []
     
     prompt = f"""
-    Atue como nutricionista preciso. Analise estes itens:
-    {lista_alimentos}
-
-    Retorne APENAS um JSON (formato de lista) com os macros.
-    Exemplo de saída esperada:
+    Atue como nutricionista. Analise: {lista_alimentos}
+    
+    Responda APENAS com um JSON (lista). Nada de texto extra.
+    Formato:
     [
         {{"kcal": 100, "prot": 10, "carb": 20, "gord": 5}},
         {{"kcal": 50, "prot": 2, "carb": 5, "gord": 1}}
     ]
-    IMPORTANTE: Retorne APENAS a lista JSON, sem textos antes ou depois.
     """
     try:
         response = model.generate_content(prompt)
         texto = response.text
         
-        # Tenta encontrar o JSON usando Regex (busca o que estiver entre [ e ])
+        # Limpeza avançada para garantir que pegamos só o JSON
         match = re.search(r'\[.*\]', texto, re.DOTALL)
         if match:
             texto_limpo = match.group(0)
             return json.loads(texto_limpo)
         else:
-            # Se não achar colchetes, tenta limpar markdown
+            # Fallback: tenta limpar crases de markdown
             texto_limpo = texto.replace("```json", "").replace("```", "").strip()
-            return json.loads(texto_limpo)
+            # Se a IA respondeu texto puro, tentamos pegar o começo e fim da lista
+            if "[" in texto_limpo and "]" in texto_limpo:
+                start = texto_limpo.find("[")
+                end = texto_limpo.rfind("]") + 1
+                return json.loads(texto_limpo[start:end])
+            return []
             
     except Exception as e:
-        st.error(f"⚠️ A IA falhou ao ler estes alimentos. Detalhe do erro: {e}")
-        st.write(f"O que a IA tentou responder: {response.text if 'response' in locals() else 'Nada'}")
-        st.stop() # Para a execução aqui para você ver o erro
+        st.error(f"Erro na IA: {e}")
         return []
 
 # --- INICIALIZAÇÃO DAS TABELAS ---
@@ -65,13 +67,13 @@ if 'refeicoes' not in st.session_state:
         )
 
 # ==========================================
-# PAINEL LATERAL (SEU PREFERIDO)
+# PAINEL LATERAL
 # ==========================================
 with st.sidebar:
     st.header("👤 Seus Dados")
     
     if api_key_status != "OK":
-        st.error(f"⚠️ Problema na API Key: {api_key_status}")
+        st.error(f"⚠️ API Key: {api_key_status}")
 
     sexo = st.radio("Sexo:", ["Masculino", "Feminino"], horizontal=True)
     col_p, col_a, col_i = st.columns(3)
@@ -128,20 +130,26 @@ with st.sidebar:
     
     st.divider()
     
-    # --- BOTÃO DE CÁLCULO (LÓGICA CORRIGIDA) ---
+    # --- BOTÃO DE CÁLCULO ---
     if st.button("🤖 Calcular Macros (IA)", type="primary"):
         if api_key_status != "OK":
             st.error("Configure sua API KEY nos Secrets primeiro!")
         else:
-            with st.spinner("A IA está analisando seu cardápio..."):
+            with st.spinner("Analisando cardápio..."):
                 for ref_nome, df in st.session_state.refeicoes.items():
                     itens_calc = []
                     indices = []
                     
                     for i, row in df.iterrows():
-                        # Verifica se tem alimento escrito E se a Kcal está zerada/vazia
+                        # Lógica segura para detectar campos vazios
                         tem_texto = row["Alimento"] and str(row["Alimento"]).strip() != ""
-                        kcal_zerada = (row["Kcal"] == 0) or pd.isna(row["Kcal"]) or (str(row["Kcal"]) == "")
+                        # Verifica se Kcal é zero, None, ou string vazia
+                        try:
+                            kcal_val = float(row["Kcal"])
+                        except:
+                            kcal_val = 0
+                            
+                        kcal_zerada = (kcal_val == 0)
                         
                         if tem_texto and kcal_zerada:
                             qtd = row["Qtd"] if row["Qtd"] else "1 porção"
@@ -160,7 +168,7 @@ with st.sidebar:
                                     df.at[idx, "G(g)"] = dados.get("gord", 0)
                             st.session_state.refeicoes[ref_nome] = df
                             
-            st.success("Cálculo concluído!")
+            st.success("Calculado!")
             st.rerun()
 
     if st.button("🗑️ Limpar Tudo"):
@@ -190,7 +198,7 @@ for ref_nome in refeicoes_padrao:
     with col_tabela:
         st.markdown(f"**{ref_nome.split('-')[1]}**")
         
-        # Tabela (Versão Corrigida sem o erro de placeholder)
+        # Tabela sem placeholder nas colunas para evitar bug
         df_editado = st.data_editor(
             st.session_state.refeicoes[ref_nome],
             num_rows="dynamic",
@@ -209,7 +217,6 @@ for ref_nome in refeicoes_padrao:
         
         st.session_state.refeicoes[ref_nome] = df_editado
         
-        # Cálculos de Subtotal
         s_kcal = df_editado["Kcal"].sum()
         s_p = df_editado["P(g)"].sum()
         s_c = df_editado["C(g)"].sum()
