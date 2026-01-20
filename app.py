@@ -1,55 +1,47 @@
 import streamlit as st
-import google.generativeai as genai
 import pandas as pd
 import json
+import requests
 import time
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Dieta Pro", page_icon="🥗", layout="wide")
 
-# --- DEBUG: MOSTRAR VERSÃO DA BIBLIOTECA ---
-# Isso vai aparecer no topo para confirmarmos se o servidor atualizou
-try:
-    lib_version = genai.__version__
-except:
-    lib_version = "Desconhecida"
-
-# --- CONFIGURAÇÃO DA IA ---
-api_key_status = "OK"
-try:
-    if "GOOGLE_API_KEY" in st.secrets:
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        # USANDO O MODELO FLASH (Requer google-generativeai >= 0.8.0)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-    else:
-        api_key_status = "FALTA_KEY"
-except Exception as e:
-    api_key_status = f"ERRO CONFIG: {e}"
-
-# --- FUNÇÃO DA IA ---
-def calcular_alimentos_ia(lista_alimentos):
-    if not lista_alimentos: return []
+# --- FUNÇÃO DE CONEXÃO DIRETA (SEM BIBLIOTECA) ---
+def chamar_gemini_direto(prompt, api_key):
+    # Endpoint oficial da API REST do Google
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     
-    prompt = f"""
-    Nutricionista: analise {lista_alimentos}.
-    Responda APENAS um JSON (lista de objetos). 
-    Exemplo: [{{"kcal": 100, "prot": 10, "carb": 20, "gord": 5}}]
-    """
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
     try:
-        response = model.generate_content(prompt)
-        texto = response.text
+        response = requests.post(url, headers=headers, json=payload)
         
-        # Limpeza do texto para extrair JSON
-        limpo = texto.replace("```json", "").replace("```", "").strip()
+        # Se der erro de permissão ou chave
+        if response.status_code != 200:
+            return {"erro": f"Erro {response.status_code}: {response.text}"}
+            
+        dados = response.json()
+        
+        # Extrai o texto da resposta complexa do Google
+        texto_resposta = dados["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Limpa o JSON
+        limpo = texto_resposta.replace("```json", "").replace("```", "").strip()
         if "[" in limpo and "]" in limpo:
             inicio = limpo.find("[")
             fim = limpo.rfind("]") + 1
             limpo = limpo[inicio:fim]
             
         return json.loads(limpo)
+        
     except Exception as e:
-        st.error(f"Erro na leitura da IA: {e}")
-        return []
+        return {"erro": str(e)}
 
 # --- INICIALIZAÇÃO ---
 refeicoes_padrao = ["07:00 - Café da Manhã", "10:00 - Lanche da Manhã", "13:00 - Almoço", "16:00 - Lanche da Tarde", "20:00 - Jantar"]
@@ -66,11 +58,11 @@ if 'refeicoes' not in st.session_state:
 # ==========================================
 with st.sidebar:
     st.header("👤 Seus Dados")
-    # Mostra a versão para sabermos se o REBOOT funcionou
-    st.caption(f"Versão do Sistema: v{lib_version}")
     
-    if api_key_status != "OK":
-        st.error(f"⚠️ API Key: {api_key_status}")
+    # Verifica se a chave existe
+    tem_chave = "GOOGLE_API_KEY" in st.secrets
+    if not tem_chave:
+        st.error("⚠️ Faltou configurar a API Key nos Secrets!")
 
     sexo = st.radio("Sexo:", ["Masculino", "Feminino"], horizontal=True)
     col_p, col_a, col_i = st.columns(3)
@@ -104,35 +96,49 @@ with st.sidebar:
     
     st.divider()
     
-    # --- BOTÃO DE CÁLCULO ---
+    # --- BOTÃO DE CÁLCULO (NOVA LÓGICA) ---
     if st.button("🤖 Calcular Macros (IA)", type="primary"):
-        if api_key_status != "OK":
-            st.error("Configure sua API KEY!")
+        if not tem_chave:
+            st.error("Sem chave configurada.")
         else:
-            status = st.status("Processando...", expanded=True)
+            api_key = st.secrets["GOOGLE_API_KEY"]
+            status = st.status("Conectando ao cérebro da IA...", expanded=True)
             try:
                 total_novos = 0
                 for ref_nome, df in st.session_state.refeicoes.items():
                     itens_calc = []
                     indices = []
                     
+                    # Prepara lista de itens
                     for i, row in df.iterrows():
                         tem_nome = row["Alimento"] and str(row["Alimento"]).strip() != ""
-                        # Verifica Kcal zero de forma segura
-                        try:
-                            k = float(row["Kcal"])
-                        except:
-                            k = 0
+                        try: val_k = float(row["Kcal"])
+                        except: val_k = 0
                         
-                        if tem_nome and k == 0:
+                        if tem_nome and val_k == 0:
                             q = row["Qtd"] if row["Qtd"] else "1 porção"
                             itens_calc.append(f"{q} de {row['Alimento']}")
                             indices.append(i)
                     
                     if itens_calc:
                         status.write(f"Calculando {ref_nome}...")
-                        res = calcular_alimentos_ia(itens_calc)
-                        if res:
+                        
+                        prompt = f"""
+                        Atue como nutricionista. Analise: {itens_calc}.
+                        Retorne APENAS um JSON (lista de objetos) com valores numéricos.
+                        Exemplo: [{{"kcal": 100, "prot": 10, "carb": 20, "gord": 5}}]
+                        """
+                        
+                        # CHAMADA DIRETA
+                        res = chamar_gemini_direto(prompt, api_key)
+                        
+                        # Verifica se voltou erro ou lista
+                        if isinstance(res, dict) and "erro" in res:
+                            status.update(label="Erro na conexão!", state="error")
+                            st.error(res["erro"])
+                            st.stop()
+                        
+                        if isinstance(res, list):
                             for j, dados in enumerate(res):
                                 if j < len(indices):
                                     idx = indices[j]
@@ -144,15 +150,15 @@ with st.sidebar:
                             total_novos += len(res)
                 
                 if total_novos > 0:
-                    status.update(label="Concluído!", state="complete", expanded=False)
+                    status.update(label="Sucesso!", state="complete", expanded=False)
                     time.sleep(1)
                     st.rerun()
                 else:
                     status.update(label="Nada novo para calcular.", state="complete")
                     
             except Exception as e:
-                status.update(label="Erro!", state="error")
-                st.error(f"Erro: {e}")
+                status.update(label="Erro interno", state="error")
+                st.error(f"Detalhes: {e}")
 
     if st.button("🗑️ Limpar Tudo"):
         for ref in refeicoes_padrao:
