@@ -7,7 +7,6 @@ import json
 st.set_page_config(page_title="Dieta Pro com IA", page_icon="💪", layout="wide")
 
 # --- CONFIGURAÇÃO DA IA COM DEBUG ---
-# Tenta configurar. Se der erro, avisa na tela lateral.
 api_key_status = "OK"
 try:
     if "GOOGLE_API_KEY" in st.secrets:
@@ -18,16 +17,15 @@ try:
 except Exception as e:
     api_key_status = f"ERRO: {e}"
 
-# --- FUNÇÃO DA IA (COM RELATÓRIO DE ERRO) ---
+# --- FUNÇÃO DA IA ---
 def calcular_alimentos_ia(lista_alimentos):
     if not lista_alimentos: return []
     
-    # Prompt reforçado para garantir JSON correto
     prompt = f"""
     Atue como nutricionista preciso. Analise estes itens:
     {lista_alimentos}
 
-    Retorne APENAS um JSON puro (sem ```json ou markdown) com este formato de lista:
+    Retorne APENAS um JSON puro (sem markdown) com este formato de lista:
     [
         {{"kcal": 100, "prot": 10, "carb": 20, "gord": 5}},
         {{"kcal": 50, "prot": 2, "carb": 5, "gord": 1}}
@@ -36,13 +34,11 @@ def calcular_alimentos_ia(lista_alimentos):
     """
     try:
         response = model.generate_content(prompt)
-        # Limpeza agressiva para evitar erros de formatação
         texto_limpo = response.text.strip()
         texto_limpo = texto_limpo.replace("```json", "").replace("```", "").replace("\n", "")
         return json.loads(texto_limpo)
     except Exception as e:
         st.error(f"Erro ao processar IA: {e}")
-        st.write(f"Resposta bruta da IA (para debug): {response.text if 'response' in locals() else 'Sem resposta'}")
         return []
 
 # --- INICIALIZAÇÃO DAS TABELAS ---
@@ -51,21 +47,18 @@ refeicoes_padrao = ["07:00 - Café da Manhã", "10:00 - Lanche da Manhã", "13:0
 if 'refeicoes' not in st.session_state:
     st.session_state.refeicoes = {}
     for ref in refeicoes_padrao:
-        # Tabela inicial padrão
         st.session_state.refeicoes[ref] = pd.DataFrame(
             [{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}]
         )
 
 # ==========================================
-# PAINEL LATERAL (RESTAURADO DA VERSÃO PRO)
+# PAINEL LATERAL (INTACTO)
 # ==========================================
 with st.sidebar:
     st.header("👤 Seus Dados")
     
-    # Check de API Key
     if api_key_status != "OK":
         st.error(f"⚠️ Problema na API Key: {api_key_status}")
-        st.info("Verifique os 'Secrets' no painel do Streamlit.")
 
     sexo = st.radio("Sexo:", ["Masculino", "Feminino"], horizontal=True)
     col_p, col_a, col_i = st.columns(3)
@@ -85,7 +78,6 @@ with st.sidebar:
     
     st.divider()
     
-    # --- OBJETIVOS ---
     st.header("🎯 Meta & Calorias")
     objetivo = st.selectbox("Objetivo:", ["Definição (Perder)", "Manutenção", "Hipertrofia (Ganhar)"])
 
@@ -96,10 +88,8 @@ with st.sidebar:
     elif "Ganhar" in objetivo:
         ajuste_calorico = st.number_input("Superávit Calórico (+):", value=300, step=50)
 
-    # --- MACROS G/KG ---
     st.subheader("Configurar Macros (g/kg)")
     c1, c2, c3 = st.columns(3)
-    # Valores padrão inteligentes baseados no objetivo
     def_p, def_c, def_g = (2.0, 4.0, 0.8)
     if "Perder" in objetivo: def_p, def_c = 2.2, 2.5
     
@@ -107,7 +97,6 @@ with st.sidebar:
     carb_g_kg = c2.number_input("Carb", value=def_c, step=0.1, format="%.1f")
     gord_g_kg = c3.number_input("Gord", value=def_g, step=0.1, format="%.1f")
 
-    # --- CÁLCULOS TOTAIS ---
     if sexo == "Masculino":
         tmb = 66.5 + (13.75 * peso) + (5.003 * altura) - (6.75 * idade)
     else:
@@ -116,38 +105,31 @@ with st.sidebar:
     gasto_total = tmb * fator
     meta_calorias = int(gasto_total + ajuste_calorico)
     
-    # Metas em gramas
     meta_prot = int(peso * prot_g_kg)
     meta_carb = int(peso * carb_g_kg)
     meta_gord = int(peso * gord_g_kg)
     
-    # Mostra Resumo na Lateral
     st.divider()
     st.metric("🔥 Meta Diária", f"{meta_calorias} kcal")
     st.caption(f"Macros: P:{meta_prot}g | C:{meta_carb}g | G:{meta_gord}g")
     
-    # Botões de Ação
     st.divider()
     if st.button("🤖 Calcular Macros (IA)", type="primary"):
         with st.spinner("Analisando todas as refeições..."):
             for ref_nome, df in st.session_state.refeicoes.items():
-                # Busca itens para calcular
                 itens_calc = []
                 indices = []
                 for i, row in df.iterrows():
-                    # Só calcula se tiver nome e Kcal for 0
                     if row["Alimento"] and str(row["Alimento"]).strip() != "" and (row["Kcal"] == 0 or pd.isna(row["Kcal"])):
                         qtd = row["Qtd"] if row["Qtd"] else "1 porção"
                         itens_calc.append(f"{qtd} de {row['Alimento']}")
                         indices.append(i)
                 
-                # Se achou itens, manda pra IA
                 if itens_calc:
                     res = calcular_alimentos_ia(itens_calc)
-                    # Preenche de volta
                     if res:
                         for j, dados in enumerate(res):
-                            if j < len(indices): # Segurança
+                            if j < len(indices):
                                 idx = indices[j]
                                 df.at[idx, "Kcal"] = dados.get("kcal", 0)
                                 df.at[idx, "P(g)"] = dados.get("prot", 0)
@@ -162,7 +144,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# ÁREA PRINCIPAL (TABELAS DE REFEIÇÃO)
+# ÁREA PRINCIPAL
 # ==========================================
 st.title("📋 Planejador de Dieta")
 
@@ -183,15 +165,16 @@ for ref_nome in refeicoes_padrao:
     with col_tabela:
         st.markdown(f"**{ref_nome.split('-')[1]}**")
         
-        # Tabela Editável
+        # --- A CORREÇÃO ESTÁ AQUI ABAIXO ---
+        # Removi o 'placeholder' que causava o erro
         df_editado = st.data_editor(
             st.session_state.refeicoes[ref_nome],
             num_rows="dynamic",
             use_container_width=True,
             key=f"editor_{ref_nome}",
             column_config={
-                "Alimento": st.column_config.TextColumn("Alimento", width="large", placeholder="Ex: 2 Ovos"),
-                "Qtd": st.column_config.TextColumn("Qtd", width="small", placeholder="Ex: 100g"),
+                "Alimento": st.column_config.TextColumn("Alimento", width="large"),
+                "Qtd": st.column_config.TextColumn("Qtd", width="small"),
                 "Kcal": st.column_config.NumberColumn("Kcal", format="%d"),
                 "P(g)": st.column_config.NumberColumn("P(g)", format="%d"),
                 "C(g)": st.column_config.NumberColumn("C(g)", format="%d"),
@@ -200,22 +183,18 @@ for ref_nome in refeicoes_padrao:
             hide_index=True
         )
         
-        # Atualiza Session State
         st.session_state.refeicoes[ref_nome] = df_editado
         
-        # Subtotais
         s_kcal = df_editado["Kcal"].sum()
         s_p = df_editado["P(g)"].sum()
         s_c = df_editado["C(g)"].sum()
         s_g = df_editado["G(g)"].sum()
         
-        # Acumula Totais Gerais
         total_dia_kcal += s_kcal
         total_dia_prot += s_p
         total_dia_carb += s_c
         total_dia_gord += s_g
         
-        # Barra de Total da Refeição (Cinza)
         st.markdown(
             f"""<div style="background-color: #f0f2f6; padding: 8px; border-radius: 5px; display: flex; justify-content: space-between; font-size: 14px;">
             <b>TOTAL REFEIÇÃO</b> <span>🔥 {int(s_kcal)} | P: {int(s_p)} | C: {int(s_c)} | G: {int(s_g)}</span></div>""", 
@@ -224,7 +203,7 @@ for ref_nome in refeicoes_padrao:
         st.divider()
 
 # ==========================================
-# RODAPÉ (COMPARATIVO COM A META DA BARRA LATERAL)
+# RODAPÉ
 # ==========================================
 st.subheader("📊 Resultado do Dia vs Meta")
 
