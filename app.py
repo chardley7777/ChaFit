@@ -1,57 +1,74 @@
 import streamlit as st
+import google.generativeai as genai
 import pandas as pd
 import json
-import requests
 import time
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Dieta Pro", page_icon="🥗", layout="wide")
 
-# --- FUNÇÃO DE CONEXÃO UNIVERSAL (TENTA VÁRIOS MODELOS) ---
-def chamar_gemini_direto(prompt, api_key):
-    # Lista de modelos para tentar (do mais novo para o mais antigo)
-    modelos_para_tentar = [
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-1.0-pro",
-        "gemini-pro"
-    ]
-    
-    headers = {"Content-Type": "application/json"}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    
-    erros_log = []
+# --- CONFIGURAÇÃO DA IA ---
+api_key_status = "OK"
+model = None
+nome_modelo_usado = "Nenhum"
 
-    for modelo in modelos_para_tentar:
-        # Tenta conectar neste modelo específico
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
+try:
+    if "GOOGLE_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+        
+        # --- A MÁGICA: AUTO-DETECÇÃO DE MODELO ---
+        # Em vez de forçar um nome, pedimos a lista disponível para sua chave
+        modelos_disponiveis = []
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
-            
-            # Se funcionou (Código 200), para de tentar e retorna o resultado
-            if response.status_code == 200:
-                dados = response.json()
-                texto_resposta = dados["candidates"][0]["content"]["parts"][0]["text"]
-                
-                # Limpa o JSON
-                limpo = texto_resposta.replace("```json", "").replace("```", "").strip()
-                if "[" in limpo and "]" in limpo:
-                    inicio = limpo.find("[")
-                    fim = limpo.rfind("]") + 1
-                    limpo = limpo[inicio:fim]
-                
-                return {"sucesso": True, "dados": json.loads(limpo), "modelo_usado": modelo}
-            else:
-                # Se deu erro, guarda o motivo e tenta o próximo
-                erros_log.append(f"{modelo}: {response.status_code}")
-                continue
-                
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    modelos_disponiveis.append(m.name)
         except Exception as e:
-            erros_log.append(f"{modelo}: Erro de conexão")
-            continue
+            api_key_status = f"Erro ao listar modelos: {e}"
 
-    # Se chegou aqui, todos falharam
-    return {"sucesso": False, "erro": " | ".join(erros_log)}
+        if modelos_disponiveis:
+            # Tenta pegar o Flash ou Pro, senão pega o primeiro da lista
+            preferidos = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-1.0-pro"]
+            escolhido = modelos_disponiveis[0] # Padrão: o primeiro que achar
+            
+            for pref in preferidos:
+                if pref in modelos_disponiveis:
+                    escolhido = pref
+                    break
+            
+            model = genai.GenerativeModel(escolhido)
+            nome_modelo_usado = escolhido
+        else:
+            api_key_status = "Nenhum modelo encontrado para esta Chave."
+            
+    else:
+        api_key_status = "FALTA_KEY"
+except Exception as e:
+    api_key_status = f"ERRO GERAL: {e}"
+
+# --- FUNÇÃO DA IA ---
+def calcular_alimentos_ia(lista_alimentos):
+    if not lista_alimentos or not model: return []
+    
+    prompt = f"""
+    Atue como nutricionista. Analise: {lista_alimentos}.
+    Responda APENAS um JSON (lista de objetos). 
+    Exemplo: [{{"kcal": 100, "prot": 10, "carb": 20, "gord": 5}}]
+    """
+    try:
+        response = model.generate_content(prompt)
+        texto = response.text
+        
+        limpo = texto.replace("```json", "").replace("```", "").strip()
+        if "[" in limpo and "]" in limpo:
+            inicio = limpo.find("[")
+            fim = limpo.rfind("]") + 1
+            limpo = limpo[inicio:fim]
+            
+        return json.loads(limpo)
+    except Exception as e:
+        st.error(f"Erro ao gerar: {e}")
+        return []
 
 # --- INICIALIZAÇÃO ---
 refeicoes_padrao = ["07:00 - Café da Manhã", "10:00 - Lanche da Manhã", "13:00 - Almoço", "16:00 - Lanche da Tarde", "20:00 - Jantar"]
@@ -69,9 +86,11 @@ if 'refeicoes' not in st.session_state:
 with st.sidebar:
     st.header("👤 Seus Dados")
     
-    tem_chave = "GOOGLE_API_KEY" in st.secrets
-    if not tem_chave:
-        st.error("⚠️ Configure a API Key!")
+    # Debug para sabermos o que está acontecendo
+    if api_key_status == "OK":
+        st.success(f"Conectado: {nome_modelo_usado.replace('models/', '')}")
+    else:
+        st.error(f"⚠️ {api_key_status}")
 
     sexo = st.radio("Sexo:", ["Masculino", "Feminino"], horizontal=True)
     col_p, col_a, col_i = st.columns(3)
@@ -107,11 +126,10 @@ with st.sidebar:
     
     # --- BOTÃO DE CÁLCULO ---
     if st.button("🤖 Calcular Macros (IA)", type="primary"):
-        if not tem_chave:
-            st.error("Sem chave configurada.")
+        if api_key_status != "OK" or not model:
+            st.error("A IA não está pronta. Verifique a chave.")
         else:
-            api_key = st.secrets["GOOGLE_API_KEY"]
-            status = st.status("Conectando ao Nutricionista IA...", expanded=True)
+            status = st.status(f"Usando {nome_modelo_usado}...", expanded=True)
             try:
                 total_novos = 0
                 for ref_nome, df in st.session_state.refeicoes.items():
@@ -128,21 +146,10 @@ with st.sidebar:
                             indices.append(i)
                     
                     if itens_calc:
-                        status.write(f"Analisando {ref_nome}...")
-                        
-                        prompt = f"""
-                        Atue como nutricionista. Analise: {itens_calc}.
-                        Retorne APENAS um JSON (lista de objetos) com valores numéricos.
-                        Exemplo: [{{"kcal": 100, "prot": 10, "carb": 20, "gord": 5}}]
-                        """
-                        
-                        # CHAMA A FUNÇÃO QUE TENTA VÁRIOS MODELOS
-                        resultado = chamar_gemini_direto(prompt, api_key)
-                        
-                        if resultado["sucesso"]:
-                            res_lista = resultado["dados"]
-                            status.write(f"✅ Sucesso usando modelo: {resultado['modelo_usado']}")
-                            for j, dados in enumerate(res_lista):
+                        status.write(f"Calculando {ref_nome}...")
+                        res = calcular_alimentos_ia(itens_calc)
+                        if res:
+                            for j, dados in enumerate(res):
                                 if j < len(indices):
                                     idx = indices[j]
                                     df.at[idx, "Kcal"] = dados.get("kcal", 0)
@@ -150,21 +157,18 @@ with st.sidebar:
                                     df.at[idx, "C(g)"] = dados.get("carb", 0)
                                     df.at[idx, "G(g)"] = dados.get("gord", 0)
                             st.session_state.refeicoes[ref_nome] = df
-                            total_novos += len(res_lista)
-                        else:
-                            status.error(f"Falha em todos os modelos: {resultado['erro']}")
-                            st.stop()
+                            total_novos += len(res)
                 
                 if total_novos > 0:
-                    status.update(label="Cálculo Concluído!", state="complete", expanded=False)
+                    status.update(label="Concluído!", state="complete", expanded=False)
                     time.sleep(1)
                     st.rerun()
                 else:
                     status.update(label="Nada novo para calcular.", state="complete")
                     
             except Exception as e:
-                status.update(label="Erro Crítico", state="error")
-                st.error(f"Erro: {e}")
+                status.update(label="Erro!", state="error")
+                st.error(f"Detalhe: {e}")
 
     if st.button("🗑️ Limpar Tudo"):
         for ref in refeicoes_padrao:
@@ -204,6 +208,7 @@ for ref_nome in refeicoes_padrao:
         )
         st.session_state.refeicoes[ref_nome] = df_editado
         
+        # Totais
         s_k = df_editado["Kcal"].sum(); s_p = df_editado["P(g)"].sum(); s_c = df_editado["C(g)"].sum(); s_g = df_editado["G(g)"].sum()
         total_dia_kcal += s_k; total_dia_prot += s_p; total_dia_carb += s_c; total_dia_gord += s_g
         
