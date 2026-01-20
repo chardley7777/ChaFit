@@ -2,11 +2,12 @@ import streamlit as st
 import google.generativeai as genai
 import pandas as pd
 import json
+import re # Biblioteca para encontrar o JSON no texto
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Dieta Pro com IA", page_icon="💪", layout="wide")
 
-# --- CONFIGURAÇÃO DA IA COM DEBUG ---
+# --- CONFIGURAÇÃO DA IA ---
 api_key_status = "OK"
 try:
     if "GOOGLE_API_KEY" in st.secrets:
@@ -17,7 +18,7 @@ try:
 except Exception as e:
     api_key_status = f"ERRO: {e}"
 
-# --- FUNÇÃO DA IA ---
+# --- FUNÇÃO DA IA (MAIS ROBUSTA) ---
 def calcular_alimentos_ia(lista_alimentos):
     if not lista_alimentos: return []
     
@@ -25,20 +26,32 @@ def calcular_alimentos_ia(lista_alimentos):
     Atue como nutricionista preciso. Analise estes itens:
     {lista_alimentos}
 
-    Retorne APENAS um JSON puro (sem markdown) com este formato de lista:
+    Retorne APENAS um JSON (formato de lista) com os macros.
+    Exemplo de saída esperada:
     [
         {{"kcal": 100, "prot": 10, "carb": 20, "gord": 5}},
         {{"kcal": 50, "prot": 2, "carb": 5, "gord": 1}}
     ]
-    Se não souber exatamente, estime com média de mercado.
+    IMPORTANTE: Retorne APENAS a lista JSON, sem textos antes ou depois.
     """
     try:
         response = model.generate_content(prompt)
-        texto_limpo = response.text.strip()
-        texto_limpo = texto_limpo.replace("```json", "").replace("```", "").replace("\n", "")
-        return json.loads(texto_limpo)
+        texto = response.text
+        
+        # Tenta encontrar o JSON usando Regex (busca o que estiver entre [ e ])
+        match = re.search(r'\[.*\]', texto, re.DOTALL)
+        if match:
+            texto_limpo = match.group(0)
+            return json.loads(texto_limpo)
+        else:
+            # Se não achar colchetes, tenta limpar markdown
+            texto_limpo = texto.replace("```json", "").replace("```", "").strip()
+            return json.loads(texto_limpo)
+            
     except Exception as e:
-        st.error(f"Erro ao processar IA: {e}")
+        st.error(f"⚠️ A IA falhou ao ler estes alimentos. Detalhe do erro: {e}")
+        st.write(f"O que a IA tentou responder: {response.text if 'response' in locals() else 'Nada'}")
+        st.stop() # Para a execução aqui para você ver o erro
         return []
 
 # --- INICIALIZAÇÃO DAS TABELAS ---
@@ -52,7 +65,7 @@ if 'refeicoes' not in st.session_state:
         )
 
 # ==========================================
-# PAINEL LATERAL (INTACTO)
+# PAINEL LATERAL (SEU PREFERIDO)
 # ==========================================
 with st.sidebar:
     st.header("👤 Seus Dados")
@@ -114,29 +127,41 @@ with st.sidebar:
     st.caption(f"Macros: P:{meta_prot}g | C:{meta_carb}g | G:{meta_gord}g")
     
     st.divider()
+    
+    # --- BOTÃO DE CÁLCULO (LÓGICA CORRIGIDA) ---
     if st.button("🤖 Calcular Macros (IA)", type="primary"):
-        with st.spinner("Analisando todas as refeições..."):
-            for ref_nome, df in st.session_state.refeicoes.items():
-                itens_calc = []
-                indices = []
-                for i, row in df.iterrows():
-                    if row["Alimento"] and str(row["Alimento"]).strip() != "" and (row["Kcal"] == 0 or pd.isna(row["Kcal"])):
-                        qtd = row["Qtd"] if row["Qtd"] else "1 porção"
-                        itens_calc.append(f"{qtd} de {row['Alimento']}")
-                        indices.append(i)
-                
-                if itens_calc:
-                    res = calcular_alimentos_ia(itens_calc)
-                    if res:
-                        for j, dados in enumerate(res):
-                            if j < len(indices):
-                                idx = indices[j]
-                                df.at[idx, "Kcal"] = dados.get("kcal", 0)
-                                df.at[idx, "P(g)"] = dados.get("prot", 0)
-                                df.at[idx, "C(g)"] = dados.get("carb", 0)
-                                df.at[idx, "G(g)"] = dados.get("gord", 0)
-                        st.session_state.refeicoes[ref_nome] = df
-        st.rerun()
+        if api_key_status != "OK":
+            st.error("Configure sua API KEY nos Secrets primeiro!")
+        else:
+            with st.spinner("A IA está analisando seu cardápio..."):
+                for ref_nome, df in st.session_state.refeicoes.items():
+                    itens_calc = []
+                    indices = []
+                    
+                    for i, row in df.iterrows():
+                        # Verifica se tem alimento escrito E se a Kcal está zerada/vazia
+                        tem_texto = row["Alimento"] and str(row["Alimento"]).strip() != ""
+                        kcal_zerada = (row["Kcal"] == 0) or pd.isna(row["Kcal"]) or (str(row["Kcal"]) == "")
+                        
+                        if tem_texto and kcal_zerada:
+                            qtd = row["Qtd"] if row["Qtd"] else "1 porção"
+                            itens_calc.append(f"{qtd} de {row['Alimento']}")
+                            indices.append(i)
+                    
+                    if itens_calc:
+                        res = calcular_alimentos_ia(itens_calc)
+                        if res:
+                            for j, dados in enumerate(res):
+                                if j < len(indices):
+                                    idx = indices[j]
+                                    df.at[idx, "Kcal"] = dados.get("kcal", 0)
+                                    df.at[idx, "P(g)"] = dados.get("prot", 0)
+                                    df.at[idx, "C(g)"] = dados.get("carb", 0)
+                                    df.at[idx, "G(g)"] = dados.get("gord", 0)
+                            st.session_state.refeicoes[ref_nome] = df
+                            
+            st.success("Cálculo concluído!")
+            st.rerun()
 
     if st.button("🗑️ Limpar Tudo"):
         for ref in refeicoes_padrao:
@@ -165,8 +190,7 @@ for ref_nome in refeicoes_padrao:
     with col_tabela:
         st.markdown(f"**{ref_nome.split('-')[1]}**")
         
-        # --- A CORREÇÃO ESTÁ AQUI ABAIXO ---
-        # Removi o 'placeholder' que causava o erro
+        # Tabela (Versão Corrigida sem o erro de placeholder)
         df_editado = st.data_editor(
             st.session_state.refeicoes[ref_nome],
             num_rows="dynamic",
@@ -185,6 +209,7 @@ for ref_nome in refeicoes_padrao:
         
         st.session_state.refeicoes[ref_nome] = df_editado
         
+        # Cálculos de Subtotal
         s_kcal = df_editado["Kcal"].sum()
         s_p = df_editado["P(g)"].sum()
         s_c = df_editado["C(g)"].sum()
