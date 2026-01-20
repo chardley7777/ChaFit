@@ -1,87 +1,131 @@
 import streamlit as st
 import google.generativeai as genai
+import json
+
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="Calculadora de Cardápio", page_icon="🍽", layout="wide")
 
 # --- CONFIGURAÇÃO DA IA ---
-# Tenta pegar a chave secreta. Se não achar, avisa o usuário.
 try:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
     model = genai.GenerativeModel('gemini-1.5-flash')
 except:
     st.error("ERRO: Configure a GOOGLE_API_KEY nos 'Secrets' do Streamlit.")
 
-st.set_page_config(page_title="NutriCalc AI", page_icon="🍎")
-
-# --- FUNÇÃO QUE CONVERSA COM A IA ---
-def analisar_alimento(texto):
+# --- FUNÇÃO QUE ANALISA O CARDÁPIO COMPLETO ---
+def analisar_cardapio(texto_cardapio):
     prompt = f"""
-    Atue como nutricionista. Analise: '{texto}'.
-    Retorne APENAS um formato JSON simples com: nome, calorias (inteiro), proteinas (g), carboidratos (g), gorduras (g).
-    Se não for comida, retorne calorias 0.
-    Exemplo: {{"nome": "Ovo", "calorias": 70, "proteinas": 6, "carboidratos": 0, "gorduras": 5}}
+    Atue como nutricionista. Analise o seguinte cardápio completo:
+    '''
+    {texto_cardapio}
+    '''
+    
+    Identifique cada alimento mencionado. Para cada um, estime: calorias (kcal), proteínas (g), carboidratos (g) e gorduras (g).
+    
+    Retorne a resposta APENAS em formato JSON, seguindo estritamente este padrão de lista:
+    [
+        {{"alimento": "Nome do Alimento 1", "qtd": "quantidade estimada", "kcal": 100, "prot": 10, "carb": 20, "gord": 5}},
+        {{"alimento": "Nome do Alimento 2", "qtd": "quantidade estimada", "kcal": 50, "prot": 2, "carb": 5, "gord": 1}}
+    ]
+    Não use Markdown (```json). Retorne apenas o texto puro do JSON.
     """
     try:
         response = model.generate_content(prompt)
-        # Limpeza básica para garantir que o JSON venha correto
-        texto_limpo = response.text.replace("```json", "").replace("```", "")
-        return eval(texto_limpo) # Converte texto em dicionário
-    except:
+        texto_limpo = response.text.strip().replace("```json", "").replace("```", "")
+        return json.loads(texto_limpo)
+    except Exception as e:
         return None
 
-# --- BARRA LATERAL (SEUS DADOS) ---
+# --- BARRA LATERAL (DADOS DO USUÁRIO) ---
 with st.sidebar:
-    st.header("Suas Metas")
-    # Simplifiquei os inputs para focar na IA, mas mantive a lógica
+    st.header("👤 Seus Dados")
+    sexo = st.radio("Sexo:", ["Masculino", "Feminino"])
     peso = st.number_input("Peso (Kg):", value=101.0)
-    meta_calorias = st.number_input("Sua Meta de Calorias:", value=2919)
+    altura = st.number_input("Altura (cm):", value=177)
+    idade = st.number_input("Idade:", value=19)
     
-    # Session State para guardar o que comeu (memória temporária)
-    if 'diario' not in st.session_state:
-        st.session_state.diario = []
+    atividade_opcoes = {
+        "Sedentário (1.2)": 1.2,
+        "Levemente ativo (1.375)": 1.375,
+        "Moderadamente ativo (1.55)": 1.55,
+        "Muito ativo (1.725)": 1.725,
+        "Extremamente ativo (1.9)": 1.9
+    }
+    atividade_selecionada = st.selectbox("Nível de Atividade:", list(atividade_opcoes.keys()))
+    fator = atividade_opcoes[atividade_selecionada]
+    
+    objetivo = st.selectbox("Objetivo:", ["Definição (-500kcal)", "Manutenção", "Hipertrofia (+500kcal)"])
+
+    # Cálculos Basais
+    if sexo == "Masculino":
+        tmb = 66.5 + (13.75 * peso) + (5.003 * altura) - (6.75 * idade)
+    else:
+        tmb = 655.1 + (9.563 * peso) + (1.850 * altura) - (4.676 * idade)
+    
+    gasto_total = tmb * fator
+    
+    ajuste = -500 if "Definição" in objetivo else (500 if "Hipertrofia" in objetivo else 0)
+    meta_calorias = int(gasto_total + ajuste)
+    
+    st.divider()
+    st.metric("🎯 Sua Meta Diária", f"{meta_calorias} kcal")
+    
+    # Metas de Macros (40/40/20)
+    meta_prot = int((meta_calorias * 0.40) / 4)
+    meta_carb = int((meta_calorias * 0.40) / 4)
+    meta_gord = int((meta_calorias * 0.20) / 9)
+    
+    st.caption(f"Metas: P: {meta_prot}g | C: {meta_carb}g | G: {meta_gord}g")
 
 # --- TELA PRINCIPAL ---
-st.title("🍎 Diário Alimentar com IA")
+st.title("🍽 Calculadora de Cardápio")
+st.write("Cole seu planejamento alimentar completo abaixo (Café, Almoço, Janta...) e veja se bate com sua meta.")
 
-# 1. Campo de Busca
-st.subheader("O que você comeu?")
-comida_input = st.text_input("Ex: 2 ovos fritos e 1 pão francês", key="input_comida")
+cardapio_input = st.text_area("Digite o cardápio aqui:", height=150, placeholder="Exemplo:\nCafé: 3 ovos mexidos e café preto\nAlmoço: 200g de arroz, 100g de feijão e 150g de frango\nJantar: Iogurte com aveia")
 
-if st.button("Registrar Alimento"):
-    with st.spinner('Consultando nutricionista artificial...'):
-        dados = analisar_alimento(comida_input)
-        
-        if dados and dados['calorias'] > 0:
-            st.session_state.diario.append(dados)
-            st.success(f"Adicionado: {dados['nome']} ({dados['calorias']} kcal)")
-        else:
-            st.error("Não entendi esse alimento. Tente ser mais específico.")
+if st.button("Calcular Cardápio Completo"):
+    if not cardapio_input:
+        st.warning("Por favor, digite algum alimento.")
+    else:
+        with st.spinner("A Nutri-IA está analisando cada item..."):
+            dados_cardapio = analisar_cardapio(cardapio_input)
+            
+            if dados_cardapio:
+                # Cálculos dos Totais
+                total_kcal = sum(item['kcal'] for item in dados_cardapio)
+                total_prot = sum(item['prot'] for item in dados_cardapio)
+                total_carb = sum(item['carb'] for item in dados_cardapio)
+                total_gord = sum(item['gord'] for item in dados_cardapio)
 
-# 2. Resumo do Dia
-st.divider()
-st.subheader("Resumo do Dia")
+                # --- EXIBIÇÃO DOS RESULTADOS ---
+                st.divider()
+                st.subheader("📊 Resultado do Planejamento")
+                
+                # Colunas de comparação (Meta vs Realizado)
+                c1, c2, c3, c4 = st.columns(4)
+                
+                # Helper para cor (Verde se estiver perto da meta, Vermelho se estourar muito)
+                def check_meta(valor, meta):
+                    delta = valor - meta
+                    return f"{delta} (Acima)" if delta > 0 else f"{delta} (Abaixo)"
 
-total_cal = sum(item['calorias'] for item in st.session_state.diario)
-total_prot = sum(item['proteinas'] for item in st.session_state.diario)
-total_carb = sum(item['carboidratos'] for item in st.session_state.diario)
-total_gord = sum(item['gorduras'] for item in st.session_state.diario)
+                c1.metric("Calorias", f"{total_kcal} kcal", f"Meta: {meta_calorias}")
+                c2.metric("Proteínas", f"{total_prot} g", f"Meta: {meta_prot}")
+                c3.metric("Carboidratos", f"{total_carb} g", f"Meta: {meta_carb}")
+                c4.metric("Gorduras", f"{total_gord} g", f"Meta: {meta_gord}")
 
-# Barra de Progresso
-progresso = min(total_cal / meta_calorias, 1.0)
-st.progress(progresso)
-st.caption(f"Você consumiu {total_cal} de {meta_calorias} Kcal")
+                # Gráficos de Barra
+                st.write("### Progresso da Meta")
+                st.caption("Calorias")
+                st.progress(min(total_kcal / meta_calorias, 1.0))
+                
+                st.caption("Proteínas")
+                st.progress(min(total_prot / meta_prot, 1.0))
 
-# Colunas de Macros
-col1, col2, col3 = st.columns(3)
-col1.metric("Proteínas", f"{total_prot}g")
-col2.metric("Carboidratos", f"{total_carb}g")
-col3.metric("Gorduras", f"{total_gord}g")
+                # Tabela Detalhada
+                st.divider()
+                st.subheader("📝 Detalhamento por Item")
+                st.table(dados_cardapio)
 
-# 3. Lista de Alimentos
-if st.session_state.diario:
-    st.write("---")
-    st.write("📝 **Histórico de hoje:**")
-    for i, item in enumerate(st.session_state.diario):
-        st.text(f"{i+1}. {item['nome']} - {item['calorias']} kcal")
-    
-    if st.button("Limpar Diário"):
-        st.session_state.diario = []
-        st.rerun()
+            else:
+                st.error("Não foi possível ler o cardápio. Tente simplificar o texto.")
