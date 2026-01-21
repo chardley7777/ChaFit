@@ -15,15 +15,12 @@ nome_modelo_usado = "Nenhum"
 try:
     if "GOOGLE_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        
-        # AUTO-DETECÇÃO DE MODELO
         modelos_disponiveis = []
         try:
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
                     modelos_disponiveis.append(m.name)
-        except Exception as e:
-            api_key_status = f"Erro listar: {e}"
+        except: pass
 
         if modelos_disponiveis:
             preferidos = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "models/gemini-1.0-pro"]
@@ -35,16 +32,15 @@ try:
             model = genai.GenerativeModel(escolhido)
             nome_modelo_usado = escolhido
         else:
-            api_key_status = "Sem modelos disponíveis." 
+            api_key_status = "Sem modelos." 
     else:
         api_key_status = "FALTA_KEY"
 except Exception as e:
     api_key_status = f"ERRO: {e}"
 
-# --- FUNÇÃO DA IA ---
+# --- FUNÇÃO 1: CALCULAR LINHAS (JÁ EXISTIA) ---
 def calcular_alimentos_ia(lista_alimentos):
     if not lista_alimentos or not model: return []
-    
     prompt = f"""
     Nutricionista: analise {lista_alimentos}.
     Responda APENAS um JSON (lista de objetos). 
@@ -52,223 +48,216 @@ def calcular_alimentos_ia(lista_alimentos):
     """
     try:
         response = model.generate_content(prompt)
-        texto = response.text
-        limpo = texto.replace("```json", "").replace("```", "").strip()
-        if "[" in limpo and "]" in limpo:
-            inicio = limpo.find("[")
-            fim = limpo.rfind("]") + 1
-            limpo = limpo[inicio:fim]
-        return json.loads(limpo)
-    except Exception as e:
-        st.error(f"Erro IA: {e}")
-        return []
+        texto = response.text.replace("```json", "").replace("```", "").strip()
+        if "[" in texto: texto = texto[texto.find("["):texto.rfind("]")+1]
+        return json.loads(texto)
+    except: return []
 
-# --- INICIALIZAÇÃO DE DADOS ---
-# Lista padrão inicial (caso o usuário nunca tenha mexido)
+# --- FUNÇÃO 2: GERAR DIETA COMPLETA (NOVA) ---
+def gerar_dieta_automatica(preferencias, meta_kcal, meta_macros, refeicoes_lista):
+    if not model: return None
+    
+    # Cria uma string com os horários para a IA entender a estrutura
+    estrutura_refeicoes = [f"{r['Horário']} - {r['Nome']}" for r in refeicoes_lista]
+    
+    prompt = f"""
+    Atue como nutricionista esportivo de elite.
+    OBJETIVO: Criar uma dieta diária completa para atingir EXATAMENTE:
+    - Calorias: {meta_kcal} kcal
+    - Proteína: {meta_macros['p']}g
+    - Carbo: {meta_macros['c']}g
+    - Gordura: {meta_macros['g']}g
+    
+    ALIMENTOS PERMITIDOS (Use apenas estes ou variações simples deles):
+    {preferencias}
+    
+    ESTRUTURA DE REFEIÇÕES (Distribua os alimentos nestes horários):
+    {estrutura_refeicoes}
+    
+    REGRA: Calcule as quantidades (em gramas ou unidades) para que a soma total do dia bata as metas.
+    
+    SAÍDA OBRIGATÓRIA: Retorne APENAS um JSON onde as chaves são os nomes exatos das refeições (ex: "07:00 - Café") e o valor é uma lista de alimentos.
+    Formato do JSON:
+    {{
+      "07:00 - Café da Manhã": [
+        {{"Alimento": "Ovo cozido", "Qtd": "3 un", "Kcal": 210, "P(g)": 18, "C(g)": 2, "G(g)": 15}},
+        {{"Alimento": "Pão integral", "Qtd": "2 fatias", "Kcal": 120, "P(g)": 4, "C(g)": 24, "G(g)": 1}}
+      ],
+      "13:00 - Almoço": [ ... ]
+    }}
+    """
+    try:
+        response = model.generate_content(prompt)
+        texto = response.text.replace("```json", "").replace("```", "").strip()
+        if "{" in texto: texto = texto[texto.find("{"):texto.rfind("}")+1]
+        return json.loads(texto)
+    except Exception as e:
+        return {"erro": str(e)}
+
+# --- INICIALIZAÇÃO ---
 schedule_padrao = [
     {"Horário": "07:00", "Nome": "Café da Manhã"},
-    {"Horário": "10:00", "Nome": "Lanche da Manhã"},
     {"Horário": "13:00", "Nome": "Almoço"},
-    {"Horário": "16:00", "Nome": "Lanche da Tarde"},
     {"Horário": "20:00", "Nome": "Jantar"},
 ]
 
-if 'meus_horarios' not in st.session_state:
-    st.session_state.meus_horarios = schedule_padrao
+if 'meus_horarios' not in st.session_state: st.session_state.meus_horarios = schedule_padrao
+if 'refeicoes' not in st.session_state: st.session_state.refeicoes = {}
 
-if 'refeicoes' not in st.session_state:
-    st.session_state.refeicoes = {}
-
-# Garante que cada horário configurado tenha sua tabela criada
+# Garante tabelas
 for item in st.session_state.meus_horarios:
     chave = f"{item['Horário']} - {item['Nome']}"
     if chave not in st.session_state.refeicoes:
-        st.session_state.refeicoes[chave] = pd.DataFrame(
-            [{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}]
-        )
+        st.session_state.refeicoes[chave] = pd.DataFrame([{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}])
 
 # ==========================================
 # BARRA LATERAL
 # ==========================================
 with st.sidebar:
     st.header("👤 Seus Dados")
-    
-    if api_key_status == "OK":
-        st.success(f"Conectado: {nome_modelo_usado.replace('models/', '')}")
-    else:
-        st.error(f"⚠️ {api_key_status}")
+    if api_key_status != "OK": st.error(f"⚠️ {api_key_status}")
 
-    # --- CONFIGURADOR DE HORÁRIOS (CORRIGIDO) ---
     with st.expander("⚙️ Configurar Horários", expanded=False):
-        st.caption("Adicione ou remova linhas abaixo:")
-        df_schedule = pd.DataFrame(st.session_state.meus_horarios)
-        
-        # REMOVIDO O 'PLACEHOLDER' QUE DAVA ERRO
-        df_schedule_editado = st.data_editor(
-            df_schedule, 
-            num_rows="dynamic", 
-            use_container_width=True,
-            column_config={
-                "Horário": st.column_config.TextColumn("Horário", width="small"),
-                "Nome": st.column_config.TextColumn("Nome", width="medium")
-            },
-            hide_index=True
-        )
-        # Atualiza a lista oficial
-        st.session_state.meus_horarios = df_schedule_editado.to_dict('records')
+        df_sch = pd.DataFrame(st.session_state.meus_horarios)
+        df_sch_ed = st.data_editor(df_sch, num_rows="dynamic", use_container_width=True, hide_index=True)
+        st.session_state.meus_horarios = df_sch_ed.to_dict('records')
 
     st.divider()
-
-    # Inputs Pessoais
-    sexo = st.radio("Sexo:", ["Masculino", "Feminino"], horizontal=True)
-    col_p, col_a, col_i = st.columns(3)
-    peso = col_p.number_input("Peso (Kg):", value=70.0, format="%.1f")
-    altura = col_a.number_input("Alt (cm):", value=175, step=1)
-    idade = col_i.number_input("Idade:", value=30, step=1)
+    sexo = st.radio("Sexo:", ["Masc", "Fem"], horizontal=True)
+    c1,c2,c3 = st.columns(3)
+    peso = c1.number_input("Peso", 70.0, format="%.1f")
+    altura = c2.number_input("Alt", 175)
+    idade = c3.number_input("Idade", 30)
     
-    atividade_opcoes = {"Sedentário (1.2)": 1.2, "Leve (1.375)": 1.375, "Moderado (1.55)": 1.55, "Intenso (1.725)": 1.725}
-    atv_sel = st.selectbox("Nível de Atividade:", list(atividade_opcoes.keys()), index=2)
-    fator = atividade_opcoes[atv_sel]
+    fator = st.selectbox("Atividade", [1.2, 1.375, 1.55, 1.725], format_func=lambda x: f"Fator {x}")
+    objetivo = st.selectbox("Objetivo", ["Definição (-)", "Manutenção", "Hipertrofia (+)"])
     
-    st.divider()
-    
-    st.header("🎯 Metas")
-    objetivo = st.selectbox("Objetivo:", ["Definição (-)", "Manutenção", "Hipertrofia (+)"])
     ajuste = 0
-    if "Definição" in objetivo: ajuste = -st.number_input("Déficit:", value=500, step=50)
-    elif "Hipertrofia" in objetivo: ajuste = st.number_input("Superávit:", value=300, step=50)
+    if "Definição" in objetivo: ajuste = -st.number_input("Déficit", 500, step=50)
+    elif "Hipertrofia" in objetivo: ajuste = st.number_input("Superávit", 300, step=50)
 
-    st.subheader("Macros (g/kg)")
-    c1, c2, c3 = st.columns(3)
-    prot_g_kg = c1.number_input("Prot", value=2.0, step=0.1)
-    carb_g_kg = c2.number_input("Carb", value=4.0, step=0.1)
-    gord_g_kg = c3.number_input("Gord", value=0.8, step=0.1)
+    st.caption("Macros (g/kg)")
+    cc1, cc2, cc3 = st.columns(3)
+    p_gkg = cc1.number_input("Prot", 2.0, step=0.1)
+    c_gkg = cc2.number_input("Carb", 4.0, step=0.1)
+    g_gkg = cc3.number_input("Gord", 0.8, step=0.1)
 
-    tmb_val = 66.5 + (13.75 * peso) + (5.003 * altura) - (6.75 * idade) if sexo == "Masculino" else 655.1 + (9.563 * peso) + (1.850 * altura) - (4.676 * idade)
-    meta_calorias = int((tmb_val * fator) + ajuste)
+    tmb = (66.5 + (13.75*peso) + (5*altura) - (6.75*idade)) if sexo == "Masc" else (655 + (9.6*peso) + (1.8*altura) - (4.7*idade))
+    meta_kcal = int((tmb * fator) + ajuste)
+    meta_p = int(peso * p_gkg)
+    meta_c = int(peso * c_gkg)
+    meta_g = int(peso * g_gkg)
     
     st.divider()
-    st.metric("🔥 Meta Diária", f"{meta_calorias} kcal")
-    
-    st.divider()
-    
-    st.write("### Ações")
-    forcar = st.checkbox("🔄 Recalcular tudo (Mesmo os prontos)", help="Marque para atualizar itens que você mudou a quantidade.")
-    
-    if st.button("🤖 Calcular Macros (IA)", type="primary"):
-        if api_key_status != "OK" or not model:
-            st.error("IA indisponível.")
-        else:
-            status = st.status("Processando...", expanded=True)
-            try:
-                total_novos = 0
-                for item in st.session_state.meus_horarios:
-                    ref_nome = f"{item['Horário']} - {item['Nome']}"
-                    
-                    if ref_nome not in st.session_state.refeicoes:
-                        st.session_state.refeicoes[ref_nome] = pd.DataFrame([{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}])
-                    
-                    df = st.session_state.refeicoes[ref_nome]
-                    itens_calc = []
-                    indices = []
-                    
-                    for i, row in df.iterrows():
-                        tem_nome = row["Alimento"] and str(row["Alimento"]).strip() != ""
-                        try: k = float(row["Kcal"])
-                        except: k = 0
-                        
-                        precisa_calcular = (k == 0) or forcar
-                        
-                        if tem_nome and precisa_calcular:
-                            q = row["Qtd"] if row["Qtd"] else "1 porção"
-                            itens_calc.append(f"{q} de {row['Alimento']}")
-                            indices.append(i)
-                    
-                    if itens_calc:
-                        status.write(f"Calculando {ref_nome}...")
-                        res = calcular_alimentos_ia(itens_calc)
-                        if res:
-                            for j, dados in enumerate(res):
-                                if j < len(indices):
-                                    idx = indices[j]
-                                    df.at[idx, "Kcal"] = dados.get("kcal", 0)
-                                    df.at[idx, "P(g)"] = dados.get("prot", 0)
-                                    df.at[idx, "C(g)"] = dados.get("carb", 0)
-                                    df.at[idx, "G(g)"] = dados.get("gord", 0)
-                            st.session_state.refeicoes[ref_nome] = df
-                            total_novos += len(res)
-                
-                if total_novos > 0:
-                    status.update(label="Atualizado!", state="complete", expanded=False)
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    status.update(label="Tudo atualizado.", state="complete")
-                    
-            except Exception as e:
-                status.update(label="Erro!", state="error")
-                st.error(f"Erro: {e}")
-
-    if st.button("🗑️ Limpar Tudo"):
-        st.session_state.refeicoes = {}
-        st.rerun()
+    st.metric("Meta Diária", f"{meta_kcal} kcal")
+    st.caption(f"P:{meta_p}g | C:{meta_c}g | G:{meta_g}g")
 
 # ==========================================
 # ÁREA PRINCIPAL
 # ==========================================
-st.title("📋 Planejador de Dieta Flexível")
+st.title("🥗 Planejador Inteligente")
 
-total_dia_kcal = 0
-total_dia_prot = 0
-total_dia_carb = 0
-total_dia_gord = 0
+# ABAS: MANUAL vs AUTOMÁTICO
+tab1, tab2 = st.tabs(["✏️ Modo Manual", "🤖 Gerador Automático"])
+
+# --- ABA 1: MODO MANUAL (O QUE JÁ EXISTIA) ---
+with tab1:
+    st.caption("Preencha manualmente e use a IA apenas para calcular calorias.")
+    forcar = st.checkbox("Recalcular valores já preenchidos", value=False)
+    
+    if st.button("Calcular Manualmente", type="secondary"):
+        status = st.status("Calculando...", expanded=True)
+        total_novos = 0
+        for item in st.session_state.meus_horarios:
+            ref = f"{item['Horário']} - {item['Nome']}"
+            if ref not in st.session_state.refeicoes: continue
+            
+            df = st.session_state.refeicoes[ref]
+            itens, idxs = [], []
+            for i, row in df.iterrows():
+                nome = str(row["Alimento"])
+                kcal = float(row["Kcal"]) if row["Kcal"] else 0
+                if nome and (kcal == 0 or forcar):
+                    itens.append(f"{row['Qtd'] or '1'} de {nome}")
+                    idxs.append(i)
+            
+            if itens:
+                res = calcular_alimentos_ia(itens)
+                for j, d in enumerate(res):
+                    if j < len(idxs):
+                        idx = idxs[j]
+                        df.at[idx, "Kcal"] = d.get("kcal",0)
+                        df.at[idx, "P(g)"] = d.get("prot",0)
+                        df.at[idx, "C(g)"] = d.get("carb",0)
+                        df.at[idx, "G(g)"] = d.get("gord",0)
+                st.session_state.refeicoes[ref] = df
+                total_novos += 1
+        status.update(label="Pronto!", state="complete", expanded=False)
+        if total_novos > 0: time.sleep(1); st.rerun()
+
+# --- ABA 2: GERADOR AUTOMÁTICO (A NOVIDADE) ---
+with tab2:
+    st.info("Diga o que você gosta, e a IA monta a dieta completa distribuindo nos seus horários.")
+    
+    preferencias = st.text_area("O que você gosta de comer?", height=100, 
+        placeholder="Ex: Arroz, feijão, frango, ovo, aveia, whey, banana, doce de leite...")
+    
+    if st.button("✨ Gerar Dieta Completa", type="primary"):
+        if not preferencias:
+            st.warning("Digite suas preferências primeiro.")
+        else:
+            with st.spinner("A IA está distribuindo seus alimentos para bater a meta..."):
+                resultado = gerar_dieta_automatica(
+                    preferencias, 
+                    meta_kcal, 
+                    {"p": meta_p, "c": meta_c, "g": meta_g},
+                    st.session_state.meus_horarios
+                )
+                
+                if resultado and "erro" not in resultado:
+                    # Atualiza as tabelas com o resultado da IA
+                    for ref_chave, lista_alimentos in resultado.items():
+                        # Cria DataFrame novo com os dados da IA
+                        novo_df = pd.DataFrame(lista_alimentos)
+                        # Garante que as colunas existem
+                        cols = ["Alimento", "Qtd", "Kcal", "P(g)", "C(g)", "G(g)"]
+                        for c in cols: 
+                            if c not in novo_df.columns: novo_df[c] = 0
+                        
+                        # Salva no estado
+                        st.session_state.refeicoes[ref_chave] = novo_df
+                    
+                    st.success("Dieta gerada com sucesso! Veja o resultado abaixo.")
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error("Falha ao gerar. Tente novamente.")
+
+# --- VISUALIZAÇÃO DAS TABELAS (COMUM ÀS DUAS ABAS) ---
+st.divider()
+total_k, total_p, total_c, total_g = 0,0,0,0
 
 for item in st.session_state.meus_horarios:
-    ref_nome = f"{item['Horário']} - {item['Nome']}"
-    
-    if ref_nome not in st.session_state.refeicoes:
-         st.session_state.refeicoes[ref_nome] = pd.DataFrame(
-            [{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}]
-        )
+    ref = f"{item['Horário']} - {item['Nome']}"
+    if ref not in st.session_state.refeicoes:
+        st.session_state.refeicoes[ref] = pd.DataFrame([{"Alimento": "", "Qtd": "", "Kcal": 0, "P(g)": 0, "C(g)": 0, "G(g)": 0}])
 
-    col_tempo, col_tabela = st.columns([1, 6])
-    
-    with col_tempo:
-        st.markdown(f"### {item['Horário']}")
-    
-    with col_tabela:
+    c_time, c_tbl = st.columns([1, 6])
+    with c_time: st.markdown(f"### {item['Horário']}")
+    with c_tbl:
         st.markdown(f"**{item['Nome']}**")
-        df_editado = st.data_editor(
-            st.session_state.refeicoes[ref_nome],
-            num_rows="dynamic",
-            use_container_width=True,
-            key=f"editor_{ref_nome}",
-            column_config={
-                "Alimento": st.column_config.TextColumn("Alimento", width="large"),
-                "Qtd": st.column_config.TextColumn("Qtd", width="small"),
-                "Kcal": st.column_config.NumberColumn("Kcal", format="%d"),
-                "P(g)": st.column_config.NumberColumn("P(g)", format="%d"),
-                "C(g)": st.column_config.NumberColumn("C(g)", format="%d"),
-                "G(g)": st.column_config.NumberColumn("G(g)", format="%d"),
-            },
-            hide_index=True
-        )
-        st.session_state.refeicoes[ref_nome] = df_editado
+        df = st.data_editor(st.session_state.refeicoes[ref], num_rows="dynamic", use_container_width=True, key=f"edit_{ref}", hide_index=True)
+        st.session_state.refeicoes[ref] = df
         
-        s_k = df_editado["Kcal"].sum(); s_p = df_editado["P(g)"].sum(); s_c = df_editado["C(g)"].sum(); s_g = df_editado["G(g)"].sum()
-        total_dia_kcal += s_k; total_dia_prot += s_p; total_dia_carb += s_c; total_dia_gord += s_g
-        
-        st.caption(f"Total: 🔥 {int(s_k)} | P: {int(s_p)} | C: {int(s_c)} | G: {int(s_g)}")
+        sk = df["Kcal"].sum(); sp = df["P(g)"].sum(); sc = df["C(g)"].sum(); sg = df["G(g)"].sum()
+        total_k+=sk; total_p+=sp; total_c+=sc; total_g+=sg
+        st.caption(f"Total: 🔥 {int(sk)} | P: {int(sp)} | C: {int(sc)} | G: {int(sg)}")
         st.divider()
 
-# Rodapé
-meta_prot = int(peso * prot_g_kg)
-meta_carb = int(peso * carb_g_kg)
-meta_gord = int(peso * gord_g_kg)
-
-st.subheader("📊 Resumo do Dia")
+# RODAPÉ
+st.subheader("📊 Resumo vs Meta")
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Kcal", f"{int(total_dia_kcal)}", f"{int(total_dia_kcal - meta_calorias)}")
-c2.metric("Prot", f"{int(total_dia_prot)}g", f"{int(total_dia_prot - meta_prot)}")
-c3.metric("Carb", f"{int(total_dia_carb)}g", f"{int(total_dia_carb - meta_carb)}")
-c4.metric("Gord", f"{int(total_dia_gord)}g", f"{int(total_dia_gord - meta_gord)}")
+c1.metric("Kcal", int(total_k), int(total_k - meta_kcal))
+c2.metric("Prot", int(total_p), int(total_p - meta_p))
+c3.metric("Carb", int(total_c), int(total_c - meta_c))
+c4.metric("Gord", int(total_g), int(total_g - meta_g))
